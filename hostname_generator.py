@@ -61,20 +61,6 @@ class SearXNGHostnamesGenerator:
             # 数据源配置
             "sources": [
                 {
-                    "name": "wdmpa - Content Farm List",
-                    "url": "https://raw.githubusercontent.com/wdmpa/content-farm-list/refs/heads/main/uBlacklist.txt",
-                    "action": "remove",
-                    "format": "ublock",
-                    "enabled": True
-                },
-                {
-                    "name": "Google Chinese Results Blocklist",
-                    "url": "https://raw.githubusercontent.com/cobaltdisco/Google-Chinese-Results-Blocklist/refs/heads/master/uBlacklist_subscription.txt",
-                    "action": "remove",
-                    "format": "ublock",
-                    "enabled": True
-                },
-                {
                     "name": "Chinese Internet is Dead",
                     "url": "https://raw.githubusercontent.com/obgnail/chinese-internet-is-dead/master/blocklist.txt",
                     "action": "remove",
