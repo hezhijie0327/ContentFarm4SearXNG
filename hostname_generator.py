@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-SearXNG Hostnames 规则生成器 - 性能优化版 (修复统计信息显示)
+SearXNG Hostnames 规则生成器 - 性能优化版
 从多个云端配置文件中获取域名列表，生成 SearXNG hostnames 规则
-修复了域名排序和TLD合并的问题，并改进了统计信息显示
+修复了路径规则误判和域名提取的问题
 
 pip install requests pyyaml argparse
 """
@@ -113,7 +113,8 @@ class SearXNGHostnamesGenerator:
             "parsing": {
                 "ignore_specific_paths": True,  # 忽略指向特定路径的规则
                 "ignore_ip": True,     # 忽略IP地址
-                "ignore_localhost": True  # 忽略本地主机
+                "ignore_localhost": True,  # 忽略本地主机
+                "strict_domain_level_check": True  # 严格检查域名级别规则
             },
             # 性能优化配置
             "optimization": {
@@ -178,6 +179,7 @@ class SearXNGHostnamesGenerator:
     def is_domain_level_rule(self, url_string: str) -> bool:
         """
         判断是否是域名级别的规则（而非特定路径规则）
+        修复版本：更严格地检查路径规则
 
         Args:
             url_string: URL字符串
@@ -185,25 +187,80 @@ class SearXNGHostnamesGenerator:
         Returns:
             是否是域名级别的规则
         """
-        # 这些模式被认为是域名级别的规则：
-        domain_level_patterns = [
-            # uBlock 域名级别模式
-            r'^\*://\*?\.?[a-zA-Z0-9.-]+/?$',                    # *://*.example.com 或 *://*.example.com/
-            r'^\*://\*?\.?[a-zA-Z0-9.-]+/\*$',                  # *://*.example.com/*
-            r'^\|\|[a-zA-Z0-9.-]+\^?$',                         # ||example.com^
-            r'^[a-zA-Z0-9.-]+/?$',                              # example.com 或 example.com/
-            r'^[a-zA-Z0-9.-]+/\*$',                             # example.com/*
-        ]
+        url_string = url_string.strip()
+        
+        # 严格检查模式
+        if self.config["parsing"].get("strict_domain_level_check", True):
+            # 这些模式被认为是域名级别的规则：
+            domain_level_patterns = [
+                # uBlock 域名级别模式 - 精确模式
+                r'^\*://\*?\.?[a-zA-Z0-9.-]+/?$',                    # *://*.example.com 或 *://*.example.com/
+                r'^\*://\*?\.?[a-zA-Z0-9.-]+/\*?$',                 # *://*.example.com/* 
+                r'^\*://[a-zA-Z0-9.-]+/?$',                         # *://example.com 或 *://example.com/
+                r'^\*://[a-zA-Z0-9.-]+/\*?$',                       # *://example.com/*
+                r'^\|\|[a-zA-Z0-9.-]+\^?$',                         # ||example.com^
+                r'^[a-zA-Z0-9.-]+/?$',                              # example.com 或 example.com/
+                r'^[a-zA-Z0-9.-]+/\*?$',                            # example.com/* 或 example.com/
+            ]
+            
+            # 检查是否匹配域名级别模式
+            for pattern in domain_level_patterns:
+                if re.match(pattern, url_string):
+                    # 额外检查：如果包含具体路径（除了/和/*），则不是域名级别
+                    if self._has_specific_path(url_string):
+                        return False
+                    return True
+            
+            return False
+        else:
+            # 兼容模式（原来的逻辑）
+            domain_level_patterns = [
+                r'^\*://\*?\.?[a-zA-Z0-9.-]+/?$',
+                r'^\*://\*?\.?[a-zA-Z0-9.-]+/\*$',
+                r'^\|\|[a-zA-Z0-9.-]+\^?$',
+                r'^[a-zA-Z0-9.-]+/?$',
+                r'^[a-zA-Z0-9.-]+/\*$',
+            ]
 
-        for pattern in domain_level_patterns:
-            if re.match(pattern, url_string.strip()):
-                return True
+            for pattern in domain_level_patterns:
+                if re.match(pattern, url_string):
+                    return True
 
+            return False
+
+    def _has_specific_path(self, url_string: str) -> bool:
+        """
+        检查URL是否包含具体的路径（非域名级别）
+        
+        Args:
+            url_string: URL字符串
+            
+        Returns:
+            是否包含具体路径
+        """
+        # 移除协议部分
+        if url_string.startswith('*://'):
+            url_part = url_string[4:]
+        elif url_string.startswith('||'):
+            url_part = url_string[2:].rstrip('^')
+        else:
+            url_part = url_string
+            
+        # 检查是否有路径部分
+        if '/' in url_part:
+            domain_and_path = url_part.split('/', 1)
+            if len(domain_and_path) > 1:
+                path_part = domain_and_path[1]
+                # 如果路径不是空、单个*或空字符串，则认为是具体路径
+                if path_part and path_part not in ['', '*']:
+                    return True
+                    
         return False
 
     def extract_domain_from_rule(self, rule: str) -> str:
         """
         从规则中提取域名
+        修复版本：更好地处理路径规则
 
         Args:
             rule: 规则字符串
@@ -213,14 +270,21 @@ class SearXNGHostnamesGenerator:
         """
         rule = rule.strip()
 
-        # uBlock 语法模式
+        # 首先检查是否包含具体路径
+        if self._has_specific_path(rule):
+            # 对于包含具体路径的规则，需要更谨慎地提取域名
+            return self._extract_domain_from_path_rule(rule)
+
+        # uBlock 语法模式 - 仅用于域名级别规则
         patterns = [
-            # *://*.domain.com/* 或 *://*.domain.com
-            r'^\*://(?:\*\.)?([a-zA-Z0-9.-]+)(?:/.*)?$',
+            # *://*.domain.com/* 或 *://*.domain.com (通配符子域名)
+            r'^\*://\*\.([a-zA-Z0-9.-]+)(?:/\*?)?$',
+            # *://domain.com/* 或 *://domain.com (无通配符)
+            r'^\*://([a-zA-Z0-9.-]+)(?:/\*?)?$',
             # ||domain.com^
             r'^\|\|([a-zA-Z0-9.-]+)\^?$',
             # 普通域名格式
-            r'^([a-zA-Z0-9.-]+)(?:/.*)?$',
+            r'^([a-zA-Z0-9.-]+)(?:/\*?)?$',
         ]
 
         for pattern in patterns:
@@ -228,11 +292,50 @@ class SearXNGHostnamesGenerator:
             if match:
                 return match.group(1)
 
-        # 通用域名提取
+        # 通用域名提取（最后的后备方案）
         domain_match = re.search(r'([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', rule)
         if domain_match:
-            return domain_match.group(1)
+            candidate = domain_match.group(1)
+            # 验证这个域名是否合理
+            if self.is_valid_domain(candidate):
+                return candidate
 
+        return None
+
+    def _extract_domain_from_path_rule(self, rule: str) -> str:
+        """
+        从包含路径的规则中提取域名
+        这个函数更加谨慎，避免过度泛化
+        
+        Args:
+            rule: 包含路径的规则字符串
+            
+        Returns:
+            域名或 None
+        """
+        rule = rule.strip()
+        
+        # 对于包含具体路径的规则，我们通常不提取域名
+        # 除非用户明确配置允许
+        if self.config["parsing"]["ignore_specific_paths"]:
+            return None
+            
+        # 如果用户允许处理路径规则，使用更精确的模式
+        path_patterns = [
+            # *://*.subdomain.domain.com/path/* -> 提取 subdomain.domain.com
+            r'^\*://\*\.([a-zA-Z0-9.-]+)/[^/]+',
+            # *://subdomain.domain.com/path/* -> 提取 subdomain.domain.com  
+            r'^\*://([a-zA-Z0-9.-]+)/[^/]+',
+        ]
+        
+        for pattern in path_patterns:
+            match = re.match(pattern, rule)
+            if match:
+                domain = match.group(1)
+                # 只有当这是一个子域名时才返回，避免提取主域名
+                if '.' in domain and len(domain.split('.')) >= 2:
+                    return domain
+                    
         return None
 
     def parse_ublock_rule(self, rule: str) -> Tuple[str, str]:
@@ -313,6 +416,7 @@ class SearXNGHostnamesGenerator:
                 ignored_samples = []
                 accepted_samples = []
                 comment_samples = []
+                path_samples = []  # 新增：路径规则样本
 
                 # 解析域名
                 for line_num, line in enumerate(response.text.strip().split('\n'), 1):
@@ -359,15 +463,17 @@ class SearXNGHostnamesGenerator:
                             # 统计忽略原因
                             if ignore_reason == "指向特定路径":
                                 stats['ignored_with_path'] += 1
-                                # 记录一些被忽略的规则样本
-                                if len(ignored_samples) < 3:
-                                    ignored_samples.append(line)
+                                # 记录一些被忽略的路径规则样本
+                                if len(path_samples) < 3:
+                                    path_samples.append(line)
                             elif ignore_reason in ["注释或空行", "仅包含注释"]:
                                 stats['ignored_comments'] += 1
                                 if len(comment_samples) < 3:
                                     comment_samples.append(line)
                             elif ignore_reason == "无效域名":
                                 stats['invalid_domains'] += 1
+                                if len(ignored_samples) < 3:
+                                    ignored_samples.append(line)
 
                     except Exception as e:
                         print(f"解析第 {line_num} 行时出错: {line[:50]}... - {e}")
@@ -388,15 +494,20 @@ class SearXNGHostnamesGenerator:
                     for sample in accepted_samples:
                         print(f"    ✓ {sample}")
 
-                if ignored_samples:
-                    print(f"  - 忽略的特定路径规则样本:")
-                    for sample in ignored_samples:
-                        print(f"    ✗ {sample}")
+                if path_samples:
+                    print(f"  - 忽略的路径规则样本:")
+                    for sample in path_samples:
+                        print(f"    🛤️  {sample}")
 
                 if comment_samples:
                     print(f"  - 忽略的注释规则样本:")
                     for sample in comment_samples:
                         print(f"    # {sample}")
+
+                if ignored_samples:
+                    print(f"  - 其他忽略的规则样本:")
+                    for sample in ignored_samples:
+                        print(f"    ✗ {sample}")
 
                 return domains, stats
 
@@ -1022,6 +1133,12 @@ class SearXNGHostnamesGenerator:
             print("🔧 已启用多规则优化模式")
             print("   将生成多个性能优化的正则表达式规则")
 
+        # 显示解析配置
+        parsing_config = self.config["parsing"]
+        print(f"📝 解析配置:")
+        print(f"   - 忽略特定路径规则: {parsing_config.get('ignore_specific_paths', True)}")
+        print(f"   - 严格域名级别检查: {parsing_config.get('strict_domain_level_check', True)}")
+
         # 收集域名
         categorized_domains = self.collect_domains()
 
@@ -1130,7 +1247,7 @@ class SearXNGHostnamesGenerator:
                         domain_count = self.category_domain_counts.get(rule_type, 0)
 
                         f.write(f"# SearXNG {rule_type} rules\n")
-                        f.write(f"# Generated by SearXNG Hostnames Generator (Enhanced)\n")
+                        f.write(f"# Generated by SearXNG Hostnames Generator (Enhanced - Fixed Path Rules)\n")
                         f.write(f"# Total rules: {rule_count}\n")
                         f.write(f"# Total domains: {domain_count}\n")
 
@@ -1145,6 +1262,7 @@ class SearXNGHostnamesGenerator:
                             f.write(f"# Multi-rule performance optimized with advanced pattern matching\n")
 
                         f.write(f"# Note: Rules targeting specific paths are ignored to prevent over-blocking\n")
+                        f.write(f"# Fixed: Improved path rule detection to avoid domain extraction issues\n")
                         f.write(f"# Smart domain sorting and TLD grouping applied for optimal performance\n\n")
 
                         # 直接写入规则内容，不包含顶级键
@@ -1165,13 +1283,14 @@ class SearXNGHostnamesGenerator:
                 with open(main_config_path, 'w', encoding='utf-8') as f:
                     f.write("# SearXNG hostnames configuration\n")
                     f.write("# This file references external rule files\n")
-                    f.write("# Generated by SearXNG Hostnames Generator (Enhanced)\n")
+                    f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed Path Rules)\n")
 
                     if self.force_single_regex or self.config["optimization"].get("force_single_regex", False):
                         f.write("# Advanced TLD-optimized single-line regex mode enabled\n")
                     else:
                         f.write("# Multi-rule performance optimized with advanced pattern matching\n")
 
+                    f.write("# Fixed: Improved path rule detection to avoid CSDN-like issues\n")
                     f.write("# Smart domain sorting and TLD grouping applied\n\n")
                     yaml.dump(main_config, f, default_flow_style=False, allow_unicode=True, indent=2)
                 print(f"已保存主配置到: {main_config_path}")
@@ -1196,7 +1315,7 @@ class SearXNGHostnamesGenerator:
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write("# SearXNG hostnames configuration\n")
-                f.write("# Generated by SearXNG Hostnames Generator (Enhanced)\n")
+                f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed Path Rules)\n")
 
                 # 添加总体统计信息
                 total_rules = sum(len(rule_data) if isinstance(rule_data, (list, dict)) else 0 for rule_data in rules.values())
@@ -1214,6 +1333,7 @@ class SearXNGHostnamesGenerator:
                     f.write("# Multi-rule performance optimized with advanced pattern matching\n")
 
                 f.write("# Note: Rules targeting specific paths are ignored to prevent over-blocking\n")
+                f.write("# Fixed: Improved path rule detection to avoid CSDN-like domain extraction issues\n")
                 f.write("# Smart domain sorting and TLD grouping applied for optimal performance\n\n")
                 yaml.dump(hostnames_config, f, default_flow_style=False, allow_unicode=True, indent=2)
 
@@ -1226,8 +1346,8 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 (高级优化版)")
-        print("=" * 60)
+        print("SearXNG Hostnames 规则生成器启动 (高级优化版 - 修复路径规则)")
+        print("=" * 70)
 
         try:
             # 生成规则
@@ -1305,6 +1425,7 @@ class SearXNGHostnamesGenerator:
 
         print(f"\n⚙️  配置:")
         print(f"  - 忽略特定路径规则: {self.config['parsing']['ignore_specific_paths']}")
+        print(f"  - 严格域名级别检查: {self.config['parsing'].get('strict_domain_level_check', True)}")
         print(f"  - 忽略IP地址: {self.config['parsing']['ignore_ip']}")
         print(f"  - 忽略localhost: {self.config['parsing']['ignore_localhost']}")
 
@@ -1354,6 +1475,11 @@ class SearXNGHostnamesGenerator:
                 if domain_count > 0 and rule_count > 0:
                     category_ratio = (rule_count / domain_count) * 100
                     print(f"  - {rule_type}: {category_ratio:.1f}% ({domain_count} 个域名 -> {rule_count} 条规则)")
+
+        print(f"\n🔧 修复说明:")
+        print(f"  - 修复了路径规则误判问题，如 '*://*.csdn.net/tags/*' 现在会被正确忽略")
+        print(f"  - 改进了域名提取逻辑，避免从路径规则中错误提取主域名")
+        print(f"  - 启用了严格的域名级别检查，提高规则生成的准确性")
 
 
 def create_sample_config():
@@ -1410,7 +1536,8 @@ def create_sample_config():
         "parsing": {
             "ignore_specific_paths": True,
             "ignore_ip": True,
-            "ignore_localhost": True
+            "ignore_localhost": True,
+            "strict_domain_level_check": True  # 新增：严格检查域名级别规则
         },
         "optimization": {
             "merge_domains": True,
@@ -1452,7 +1579,7 @@ def create_sample_config():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (高级优化版)")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (高级优化版 - 修复路径规则)")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--create-config", action="store_true", help="创建示例配置文件")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式（将所有域名合并为一个规则）")
