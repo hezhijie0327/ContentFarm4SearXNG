@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-SearXNG Hostnames 规则生成器 - 修复TLD优化问题
-修复了域名TLD优化中丢失顶级域名的问题
+SearXNG Hostnames 规则生成器 - 修复TLD优化问题 + 白名单功能
+修复了域名TLD优化中丢失顶级域名的问题，并添加了白名单过滤功能
 
 pip install requests pyyaml argparse
 """
@@ -30,13 +30,16 @@ class SearXNGHostnamesGenerator:
         self.config = self.load_config(config_file)
         self.force_single_regex = force_single_regex
         self.domains = set()
+        self.whitelist_patterns = []  # 编译后的白名单正则模式
+        self.whitelist_domains = set()  # 精确匹配的白名单域名
         self.stats = {
             'total_rules': 0,
             'parsed_domains': 0,
             'ignored_with_path': 0,
             'invalid_domains': 0,
             'duplicate_domains': 0,
-            'ignored_comments': 0
+            'ignored_comments': 0,
+            'whitelist_filtered': 0  # 新增：被白名单过滤的域名数量
         }
         # 新增：记录每个类别的域名数量
         self.category_domain_counts = {
@@ -45,6 +48,9 @@ class SearXNGHostnamesGenerator:
             'high_priority': 0,
             'replace': 0
         }
+
+        # 加载白名单
+        self.load_whitelist()
 
     def load_config(self, config_file: str) -> Dict:
         """
@@ -85,7 +91,7 @@ class SearXNGHostnamesGenerator:
                     "url": "https://danny0838.github.io/content-farm-terminator/files/blocklist/extra-content-farms.txt",
                     "action": "remove",
                     "format": "ublock",
-                    "enabled": False
+                    "enabled": True
                 },
                 {
                     "name": "Content Farm Terminator - Bad Cloners",
@@ -95,6 +101,53 @@ class SearXNGHostnamesGenerator:
                     "enabled": True
                 },
             ],
+            # 白名单配置
+            "whitelist": {
+                "enabled": True,
+                "mode": "remove_from_all",  # remove_from_all, remove_from_sources, custom_action
+                "sources": [
+                    # 从URL加载白名单
+                    #{
+                    #    "name": "Custom Whitelist",
+                    #    "url": "https://example.com/whitelist.txt",
+                    #    "format": "domain",  # domain, ublock, regex
+                    #    "enabled": False
+                    #},
+                    # 从本地文件加载白名单
+                    #{
+                    #    "name": "Local Whitelist",
+                    #    "file": "./whitelist.txt",
+                    #    "format": "domain",
+                    #    "enabled": False
+                    #}
+                ],
+                # 直接在配置中定义的白名单
+                "domains": [
+                    # 精确域名匹配
+                    "baidu.com",
+                    "google.com",
+                    "bing.com"
+                ],
+                "patterns": [
+                    # 正则表达式模式匹配
+                    r".*\.gov\..*",      # 政府网站
+                    r".*\.edu\..*",      # 教育网站
+                    r".*wikipedia\..*"   # 维基百科
+                ],
+                "wildcard_domains": [
+                    # 通配符域名匹配（会转换为正则）
+                    "*.github.com",      # GitHub子域名
+                    "*.stackoverflow.com" # Stack Overflow
+                ],
+                # 按源名称配置特定白名单
+                "source_specific": {
+                    # 只对特定数据源应用的白名单
+                    #"Chinese Internet is Dead": {
+                    #    "domains": ["example.com"],
+                    #    "patterns": [r".*\.example\..*"]
+                    #}
+                }
+            },
             # 域名替换规则
             "replace_rules": {
                 #'(.*\.)?youtube\.com$': 'yt.example.com',
@@ -181,6 +234,255 @@ class SearXNGHostnamesGenerator:
                 self._deep_merge(base_dict[key], value)
             else:
                 base_dict[key] = value
+
+    def load_whitelist(self) -> None:
+        """
+        加载白名单配置
+        """
+        if not self.config.get("whitelist", {}).get("enabled", False):
+            print("🚫 白名单功能已禁用")
+            return
+
+        print("📝 正在加载白名单配置...")
+        whitelist_config = self.config["whitelist"]
+
+        # 加载直接配置的域名
+        domains = whitelist_config.get("domains", [])
+        self.whitelist_domains.update(d.lower() for d in domains if d)
+        if domains:
+            print(f"  ✅ 加载了 {len(domains)} 个精确匹配域名")
+
+        # 加载正则表达式模式
+        patterns = whitelist_config.get("patterns", [])
+        for pattern in patterns:
+            try:
+                compiled_pattern = re.compile(pattern, re.IGNORECASE)
+                self.whitelist_patterns.append(compiled_pattern)
+            except re.error as e:
+                print(f"  ❌ 无效的正则表达式模式 '{pattern}': {e}")
+        if patterns:
+            print(f"  ✅ 加载了 {len(patterns)} 个正则表达式模式")
+
+        # 加载通配符域名（转换为正则）
+        wildcard_domains = whitelist_config.get("wildcard_domains", [])
+        for wildcard in wildcard_domains:
+            try:
+                # 转换通配符为正则表达式
+                regex_pattern = self._wildcard_to_regex(wildcard)
+                compiled_pattern = re.compile(regex_pattern, re.IGNORECASE)
+                self.whitelist_patterns.append(compiled_pattern)
+            except re.error as e:
+                print(f"  ❌ 无效的通配符域名 '{wildcard}': {e}")
+        if wildcard_domains:
+            print(f"  ✅ 加载了 {len(wildcard_domains)} 个通配符域名")
+
+        # 从远程源和本地文件加载白名单
+        sources = whitelist_config.get("sources", [])
+        for source in sources:
+            if not source.get("enabled", True):
+                continue
+
+            try:
+                if "url" in source:
+                    # 从URL加载
+                    print(f"  🌐 正在从URL加载白名单: {source['name']}")
+                    domains_from_url = self._load_whitelist_from_url(source)
+                    self._add_domains_to_whitelist(domains_from_url, source.get("format", "domain"))
+                elif "file" in source:
+                    # 从本地文件加载
+                    print(f"  📁 正在从文件加载白名单: {source['name']}")
+                    domains_from_file = self._load_whitelist_from_file(source)
+                    self._add_domains_to_whitelist(domains_from_file, source.get("format", "domain"))
+            except Exception as e:
+                print(f"  ❌ 加载白名单源 '{source['name']}' 失败: {e}")
+
+        total_domains = len(self.whitelist_domains)
+        total_patterns = len(self.whitelist_patterns)
+        print(f"📋 白名单加载完成: {total_domains} 个精确域名, {total_patterns} 个模式")
+
+    def _wildcard_to_regex(self, wildcard: str) -> str:
+        """
+        将通配符域名转换为正则表达式
+
+        Args:
+            wildcard: 通配符域名 (如 *.example.com)
+
+        Returns:
+            正则表达式字符串
+        """
+        # 转义除了*之外的特殊字符
+        escaped = re.escape(wildcard)
+        # 将转义后的*替换为.*
+        regex = escaped.replace(r'\*', '.*')
+        # 添加开始和结束锚点
+        return f"^{regex}$"
+
+    def _load_whitelist_from_url(self, source: dict) -> List[str]:
+        """
+        从URL加载白名单
+
+        Args:
+            source: 白名单源配置
+
+        Returns:
+            域名列表
+        """
+        url = source["url"]
+        timeout = self.config["request_config"]["timeout"]
+        retry_count = self.config["request_config"]["retry_count"]
+        retry_delay = self.config["request_config"]["retry_delay"]
+
+        for attempt in range(retry_count):
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                response = requests.get(url, timeout=timeout, headers=headers)
+                response.raise_for_status()
+
+                return self._parse_whitelist_content(response.text, source.get("format", "domain"))
+
+            except requests.RequestException as e:
+                print(f"    ❌ 获取失败 (尝试 {attempt + 1}/{retry_count}): {e}")
+                if attempt < retry_count - 1:
+                    time.sleep(retry_delay)
+
+        return []
+
+    def _load_whitelist_from_file(self, source: dict) -> List[str]:
+        """
+        从本地文件加载白名单
+
+        Args:
+            source: 白名单源配置
+
+        Returns:
+            域名列表
+        """
+        file_path = source["file"]
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return self._parse_whitelist_content(content, source.get("format", "domain"))
+        except FileNotFoundError:
+            print(f"    ❌ 文件不存在: {file_path}")
+        except Exception as e:
+            print(f"    ❌ 读取文件失败: {e}")
+
+        return []
+
+    def _parse_whitelist_content(self, content: str, format_type: str) -> List[str]:
+        """
+        解析白名单内容
+
+        Args:
+            content: 文件内容
+            format_type: 格式类型 (domain, ublock, regex)
+
+        Returns:
+            域名列表
+        """
+        domains = []
+
+        for line in content.strip().split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            if format_type == "domain":
+                # 纯域名格式
+                cleaned_domain = self.clean_domain(line)
+                if cleaned_domain:
+                    domains.append(cleaned_domain)
+            elif format_type == "ublock":
+                # uBlock格式
+                domain, _ = self.parse_ublock_rule(line)
+                if domain:
+                    domains.append(domain)
+            elif format_type == "regex":
+                # 正则表达式格式，直接作为模式处理
+                try:
+                    compiled_pattern = re.compile(line, re.IGNORECASE)
+                    self.whitelist_patterns.append(compiled_pattern)
+                except re.error as e:
+                    print(f"    ❌ 无效的正则表达式: {line} - {e}")
+
+        return domains
+
+    def _add_domains_to_whitelist(self, domains: List[str], format_type: str) -> None:
+        """
+        将域名添加到白名单
+
+        Args:
+            domains: 域名列表
+            format_type: 格式类型
+        """
+        if format_type == "regex":
+            # 正则表达式已经在解析时处理了
+            return
+
+        added_count = 0
+        for domain in domains:
+            if domain and domain not in self.whitelist_domains:
+                self.whitelist_domains.add(domain.lower())
+                added_count += 1
+
+        if added_count > 0:
+            print(f"    ✅ 添加了 {added_count} 个域名到白名单")
+
+    def is_whitelisted(self, domain: str, source_name: str = None) -> Tuple[bool, str]:
+        """
+        检查域名是否在白名单中
+
+        Args:
+            domain: 要检查的域名
+            source_name: 数据源名称（用于源特定白名单）
+
+        Returns:
+            (是否在白名单中, 匹配原因)
+        """
+        if not self.config.get("whitelist", {}).get("enabled", False):
+            return False, ""
+
+        domain_lower = domain.lower()
+
+        # 检查精确域名匹配
+        if domain_lower in self.whitelist_domains:
+            return True, f"精确匹配: {domain}"
+
+        # 检查父域名匹配（例如 sub.example.com 匹配 example.com）
+        domain_parts = domain_lower.split('.')
+        for i in range(1, len(domain_parts)):
+            parent_domain = '.'.join(domain_parts[i:])
+            if parent_domain in self.whitelist_domains:
+                return True, f"父域名匹配: {parent_domain}"
+
+        # 检查正则表达式模式匹配
+        for pattern in self.whitelist_patterns:
+            if pattern.match(domain_lower):
+                return True, f"模式匹配: {pattern.pattern}"
+
+        # 检查源特定白名单
+        if source_name:
+            source_whitelist = self.config["whitelist"].get("source_specific", {}).get(source_name, {})
+
+            # 检查源特定精确域名
+            source_domains = source_whitelist.get("domains", [])
+            for wd in source_domains:
+                if domain_lower == wd.lower() or domain_lower.endswith('.' + wd.lower()):
+                    return True, f"源特定域名匹配: {wd}"
+
+            # 检查源特定模式
+            source_patterns = source_whitelist.get("patterns", [])
+            for pattern_str in source_patterns:
+                try:
+                    pattern = re.compile(pattern_str, re.IGNORECASE)
+                    if pattern.match(domain_lower):
+                        return True, f"源特定模式匹配: {pattern_str}"
+                except re.error:
+                    continue
+
+        return False, ""
 
     def is_domain_level_rule(self, url_string: str) -> bool:
         """
@@ -379,13 +681,14 @@ class SearXNGHostnamesGenerator:
 
         return None, "无法解析规则格式"
 
-    def fetch_domain_list(self, url: str, format_type: str = "domain") -> Tuple[Set[str], Dict]:
+    def fetch_domain_list(self, url: str, format_type: str = "domain", source_name: str = None) -> Tuple[Set[str], Dict]:
         """
         从URL获取域名列表
 
         Args:
             url: 域名列表URL
             format_type: 格式类型，"domain" 或 "ublock"
+            source_name: 数据源名称（用于白名单过滤）
 
         Returns:
             (域名集合, 统计信息)
@@ -397,7 +700,8 @@ class SearXNGHostnamesGenerator:
             'ignored_with_path': 0,
             'invalid_domains': 0,
             'duplicate_domains': 0,
-            'ignored_comments': 0
+            'ignored_comments': 0,
+            'whitelist_filtered': 0  # 被白名单过滤的数量
         }
 
         retry_count = self.config["request_config"]["retry_count"]
@@ -420,6 +724,7 @@ class SearXNGHostnamesGenerator:
                 accepted_samples = []
                 comment_samples = []
                 path_samples = []  # 新增：路径规则样本
+                whitelist_samples = []  # 新增：白名单过滤样本
 
                 # 解析域名
                 for line_num, line in enumerate(response.text.strip().split('\n'), 1):
@@ -454,14 +759,22 @@ class SearXNGHostnamesGenerator:
                                     ignore_reason = None if domain else "无效域名"
 
                         if domain:
-                            if domain in domains:
-                                stats['duplicate_domains'] += 1
+                            # 检查白名单
+                            is_whitelisted, whitelist_reason = self.is_whitelisted(domain, source_name)
+
+                            if is_whitelisted:
+                                stats['whitelist_filtered'] += 1
+                                if len(whitelist_samples) < 3:
+                                    whitelist_samples.append(f"{line} -> {domain} ({whitelist_reason})")
                             else:
-                                domains.add(domain)
-                                stats['parsed_domains'] += 1
-                                # 记录一些被接受的规则样本
-                                if len(accepted_samples) < 3:
-                                    accepted_samples.append(f"{line} -> {domain}")
+                                if domain in domains:
+                                    stats['duplicate_domains'] += 1
+                                else:
+                                    domains.add(domain)
+                                    stats['parsed_domains'] += 1
+                                    # 记录一些被接受的规则样本
+                                    if len(accepted_samples) < 3:
+                                        accepted_samples.append(f"{line} -> {domain}")
                         else:
                             # 统计忽略原因
                             if ignore_reason == "指向特定路径":
@@ -490,12 +803,18 @@ class SearXNGHostnamesGenerator:
                 print(f"  - 忽略(注释): {stats['ignored_comments']}")
                 print(f"  - 忽略(无效域名): {stats['invalid_domains']}")
                 print(f"  - 重复域名: {stats['duplicate_domains']}")
+                print(f"  - 白名单过滤: {stats['whitelist_filtered']}")
 
                 # 显示样本
                 if accepted_samples:
                     print(f"  - 接受的规则样本:")
                     for sample in accepted_samples:
                         print(f"    ✓ {sample}")
+
+                if whitelist_samples:
+                    print(f"  - 白名单过滤样本:")
+                    for sample in whitelist_samples:
+                        print(f"    🚫 {sample}")
 
                 if path_samples:
                     print(f"  - 忽略的路径规则样本:")
@@ -1184,7 +1503,8 @@ class SearXNGHostnamesGenerator:
             'ignored_with_path': 0,
             'invalid_domains': 0,
             'duplicate_domains': 0,
-            'ignored_comments': 0
+            'ignored_comments': 0,
+            'whitelist_filtered': 0
         }
 
         for source in self.config["sources"]:
@@ -1195,7 +1515,7 @@ class SearXNGHostnamesGenerator:
             format_type = source.get("format", "domain")
             print(f"格式类型: {format_type}")
 
-            domains, source_stats = self.fetch_domain_list(source["url"], format_type)
+            domains, source_stats = self.fetch_domain_list(source["url"], format_type, source["name"])
 
             # 累加统计信息
             for key in self.stats:
@@ -1251,6 +1571,18 @@ class SearXNGHostnamesGenerator:
         print(f"📝 解析配置:")
         print(f"   - 忽略特定路径规则: {parsing_config.get('ignore_specific_paths', True)}")
         print(f"   - 严格域名级别检查: {parsing_config.get('strict_domain_level_check', True)}")
+
+        # 显示白名单配置
+        whitelist_config = self.config.get("whitelist", {})
+        if whitelist_config.get("enabled", False):
+            print(f"🚫 白名单配置:")
+            print(f"   - 白名单模式: {whitelist_config.get('mode', 'remove_from_all')}")
+            print(f"   - 精确域名: {len(whitelist_config.get('domains', []))} 个")
+            print(f"   - 模式规则: {len(whitelist_config.get('patterns', []))} 个")
+            print(f"   - 通配符域名: {len(whitelist_config.get('wildcard_domains', []))} 个")
+            print(f"   - 外部源: {len(whitelist_config.get('sources', []))} 个")
+        else:
+            print(f"🚫 白名单功能已禁用")
 
         # 收集域名
         categorized_domains = self.collect_domains()
@@ -1360,7 +1692,7 @@ class SearXNGHostnamesGenerator:
                         domain_count = self.category_domain_counts.get(rule_type, 0)
 
                         f.write(f"# SearXNG {rule_type} rules\n")
-                        f.write(f"# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues)\n")
+                        f.write(f"# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues + Whitelist)\n")
                         f.write(f"# Total rules: {rule_count}\n")
                         f.write(f"# Total domains: {domain_count}\n")
 
@@ -1376,7 +1708,13 @@ class SearXNGHostnamesGenerator:
 
                         f.write(f"# Note: Rules targeting specific paths are ignored to prevent over-blocking\n")
                         f.write(f"# Fixed: TLD optimization now preserves complete domain structure\n")
-                        f.write(f"# Smart domain sorting and TLD grouping applied for optimal performance\n\n")
+                        f.write(f"# Smart domain sorting and TLD grouping applied for optimal performance\n")
+
+                        # 添加白名单信息
+                        if self.config.get("whitelist", {}).get("enabled", False):
+                            f.write(f"# Whitelist filtering enabled - {self.stats.get('whitelist_filtered', 0)} domains filtered\n")
+
+                        f.write(f"\n")
 
                         # 直接写入规则内容，不包含顶级键
                         yaml.dump(rule_data, f, default_flow_style=False, allow_unicode=True, indent=2)
@@ -1396,7 +1734,7 @@ class SearXNGHostnamesGenerator:
                 with open(main_config_path, 'w', encoding='utf-8') as f:
                     f.write("# SearXNG hostnames configuration\n")
                     f.write("# This file references external rule files\n")
-                    f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues)\n")
+                    f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues + Whitelist)\n")
 
                     if self.force_single_regex or self.config["optimization"].get("force_single_regex", False):
                         f.write("# Advanced TLD-optimized single-line regex mode enabled\n")
@@ -1404,7 +1742,13 @@ class SearXNGHostnamesGenerator:
                         f.write("# Multi-rule performance optimized with advanced pattern matching\n")
 
                     f.write("# Fixed: TLD optimization preserves complete domain structure (.pixnet.net vs .pixnet)\n")
-                    f.write("# Smart domain sorting and TLD grouping applied\n\n")
+                    f.write("# Smart domain sorting and TLD grouping applied\n")
+
+                    # 添加白名单信息
+                    if self.config.get("whitelist", {}).get("enabled", False):
+                        f.write("# Whitelist filtering enabled for better control\n")
+
+                    f.write("\n")
                     yaml.dump(main_config, f, default_flow_style=False, allow_unicode=True, indent=2)
                 print(f"已保存主配置到: {main_config_path}")
             except Exception as e:
@@ -1428,7 +1772,7 @@ class SearXNGHostnamesGenerator:
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write("# SearXNG hostnames configuration\n")
-                f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues)\n")
+                f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues + Whitelist)\n")
 
                 # 添加总体统计信息
                 total_rules = sum(len(rule_data) if isinstance(rule_data, (list, dict)) else 0 for rule_data in rules.values())
@@ -1447,7 +1791,13 @@ class SearXNGHostnamesGenerator:
 
                 f.write("# Note: Rules targeting specific paths are ignored to prevent over-blocking\n")
                 f.write("# Fixed: TLD optimization now preserves complete domain structure (*.pixnet.net vs *.pixnet)\n")
-                f.write("# Smart domain sorting and TLD grouping applied for optimal performance\n\n")
+                f.write("# Smart domain sorting and TLD grouping applied for optimal performance\n")
+
+                # 添加白名单信息
+                if self.config.get("whitelist", {}).get("enabled", False):
+                    f.write(f"# Whitelist filtering enabled - {self.stats.get('whitelist_filtered', 0)} domains filtered\n")
+
+                f.write("\n")
                 yaml.dump(hostnames_config, f, default_flow_style=False, allow_unicode=True, indent=2)
 
             print(f"已保存完整配置到: {filepath}")
@@ -1459,8 +1809,8 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 (高级优化版 - 修复TLD问题)")
-        print("=" * 70)
+        print("SearXNG Hostnames 规则生成器启动 (高级优化版 - 修复TLD问题 + 白名单功能)")
+        print("=" * 80)
 
         try:
             # 生成规则
@@ -1526,6 +1876,7 @@ class SearXNGHostnamesGenerator:
         print(f"  - 忽略(注释): {self.stats['ignored_comments']:,}")
         print(f"  - 忽略(无效域名): {self.stats['invalid_domains']:,}")
         print(f"  - 重复域名: {self.stats['duplicate_domains']:,}")
+        print(f"  - 白名单过滤: {self.stats['whitelist_filtered']:,}")
 
         print(f"\n📁 输出目录: {self.config['output']['directory']}")
 
@@ -1541,6 +1892,20 @@ class SearXNGHostnamesGenerator:
         print(f"  - 严格域名级别检查: {self.config['parsing'].get('strict_domain_level_check', True)}")
         print(f"  - 忽略IP地址: {self.config['parsing']['ignore_ip']}")
         print(f"  - 忽略localhost: {self.config['parsing']['ignore_localhost']}")
+
+        # 白名单配置
+        whitelist_config = self.config.get("whitelist", {})
+        print(f"\n🚫 白名单配置:")
+        if whitelist_config.get("enabled", False):
+            print(f"  - 状态: 已启用")
+            print(f"  - 模式: {whitelist_config.get('mode', 'remove_from_all')}")
+            print(f"  - 精确域名: {len(whitelist_config.get('domains', []))} 个")
+            print(f"  - 模式规则: {len(whitelist_config.get('patterns', []))} 个")
+            print(f"  - 通配符域名: {len(whitelist_config.get('wildcard_domains', []))} 个")
+            print(f"  - 外部源: {len([s for s in whitelist_config.get('sources', []) if s.get('enabled', True)])} 个")
+            print(f"  - 过滤的域名: {self.stats['whitelist_filtered']:,} 个")
+        else:
+            print(f"  - 状态: 已禁用")
 
         # 性能优化配置
         opt_config = self.config["optimization"]
@@ -1589,6 +1954,13 @@ class SearXNGHostnamesGenerator:
                     category_ratio = (rule_count / domain_count) * 100
                     print(f"  - {rule_type}: {category_ratio:.1f}% ({domain_count} 个域名 -> {rule_count} 条规则)")
 
+        print(f"\n🔧 新增功能:")
+        print(f"  - ✅ 白名单功能：支持精确匹配、正则表达式、通配符")
+        print(f"  - ✅ 多源白名单：支持从URL和本地文件加载白名单")
+        print(f"  - ✅ 源特定白名单：可对特定数据源应用不同白名单")
+        print(f"  - ✅ 父域名匹配：子域名会被父域名白名单规则匹配")
+        print(f"  - ✅ 实时过滤统计：显示被白名单过滤的域名数量")
+
         print(f"\n🔧 修复说明:")
         print(f"  - 修复了TLD优化中丢失顶级域名的问题")
         print(f"  - 现在 'a0cuy6cmk2.pixnet.net' 会正确生成为 '*.pixnet.net$' 而不是 '*.pixnet$'")
@@ -1631,6 +2003,47 @@ def create_sample_config():
                 "enabled": False
             }
         ],
+        "whitelist": {
+            "enabled": True,
+            "mode": "remove_from_all",
+            "sources": [
+                {
+                    "name": "Custom Whitelist",
+                    "url": "https://example.com/whitelist.txt",
+                    "format": "domain",
+                    "enabled": False
+                },
+                {
+                    "name": "Local Whitelist",
+                    "file": "./whitelist.txt",
+                    "format": "domain",
+                    "enabled": False
+                }
+            ],
+            "domains": [
+                "baidu.com",
+                "google.com",
+                "bing.com",
+                "github.com",
+                "stackoverflow.com"
+            ],
+            "patterns": [
+                r".*\.gov\..*",
+                r".*\.edu\..*",
+                r".*wikipedia\..*"
+            ],
+            "wildcard_domains": [
+                "*.github.com",
+                "*.stackoverflow.com",
+                "*.microsoft.com"
+            ],
+            "source_specific": {
+                "Chinese Internet is Dead": {
+                    "domains": ["zhihu.com", "csdn.net"],
+                    "patterns": [r".*\.edu\.cn$"]
+                }
+            }
+        },
         "replace_rules": {
             '(.*\.)?youtube\.com$': 'yt.example.com',
             '(.*\.)?youtu\.be$': 'yt.example.com',
@@ -1690,10 +2103,16 @@ def create_sample_config():
         yaml.dump(sample_config, f, default_flow_style=False, allow_unicode=True, indent=2)
 
     print("示例配置文件已创建: config.yaml")
+    print("\n🚫 白名单配置说明:")
+    print("  - domains: 精确匹配的域名列表")
+    print("  - patterns: 正则表达式模式列表")
+    print("  - wildcard_domains: 通配符域名列表（如 *.example.com）")
+    print("  - sources: 从URL或本地文件加载白名单")
+    print("  - source_specific: 对特定数据源应用的白名单")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (高级优化版 - 修复TLD问题)")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (高级优化版 - 修复TLD问题 + 白名单功能)")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--create-config", action="store_true", help="创建示例配置文件")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式（将所有域名合并为一个规则）")
