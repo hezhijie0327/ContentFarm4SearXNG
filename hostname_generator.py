@@ -81,6 +81,13 @@ class SearXNGHostnamesGenerator:
                     "enabled": True
                 },
                 {
+                    "name": "Content Farm Terminator - Extra Content Farm Filters",
+                    "url": "https://danny0838.github.io/content-farm-terminator/files/blocklist/extra-content-farms.txt",
+                    "action": "remove",
+                    "format": "ublock",
+                    "enabled": False
+                },
+                {
                     "name": "Content Farm Terminator - Bad Cloners",
                     "url": "https://danny0838.github.io/content-farm-terminator/files/blocklist-ublacklist/bad-cloners.txt",
                     "action": "remove",
