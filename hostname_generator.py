@@ -140,7 +140,7 @@ class SearXNGHostnamesGenerator:
             # 输出配置
             "output": {
                 "mode": "separate_files",  # separate_files 或 single_file
-                "directory": "./hostnames_rules/",
+                "directory": "./rules/",
                 "files": {
                     "replace": "rewrite-hosts.yml",
                     "remove": "remove-hosts.yml",
@@ -1668,7 +1668,7 @@ def create_sample_config():
         },
         "output": {
             "mode": "separate_files",
-            "directory": "./hostnames_rules/",
+            "directory": "./rules/",
             "files": {
                 "replace": "rewrite-hosts.yml",
                 "remove": "remove-hosts.yml",
