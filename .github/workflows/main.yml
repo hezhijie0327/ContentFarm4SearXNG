@@ -1,12 +1,11 @@
-# Current Version: 1.0.0
+# Current Version: 1.0.1
 
 name: Build & Release hezhijie0327/ContentFarm4SearXNG
 
 on:
-    push:
-        branches: [main]
-    schedule:
-        - cron: "0 0 * * 0"
+  schedule:
+    - cron: "0 8,20 * * *" # UTC+8 04:00 / 16:00
+  workflow_dispatch:
 
 jobs:
     build:
