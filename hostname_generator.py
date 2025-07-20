@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-SearXNG Hostnames 规则生成器 - 性能优化版
-从多个云端配置文件中获取域名列表，生成 SearXNG hostnames 规则
-修复了路径规则误判和域名提取的问题
+SearXNG Hostnames 规则生成器 - 修复TLD优化问题
+修复了域名TLD优化中丢失顶级域名的问题
 
 pip install requests pyyaml argparse
 """
@@ -179,7 +178,6 @@ class SearXNGHostnamesGenerator:
     def is_domain_level_rule(self, url_string: str) -> bool:
         """
         判断是否是域名级别的规则（而非特定路径规则）
-        修复版本：更严格地检查路径规则
 
         Args:
             url_string: URL字符串
@@ -188,21 +186,21 @@ class SearXNGHostnamesGenerator:
             是否是域名级别的规则
         """
         url_string = url_string.strip()
-        
+
         # 严格检查模式
         if self.config["parsing"].get("strict_domain_level_check", True):
             # 这些模式被认为是域名级别的规则：
             domain_level_patterns = [
                 # uBlock 域名级别模式 - 精确模式
                 r'^\*://\*?\.?[a-zA-Z0-9.-]+/?$',                    # *://*.example.com 或 *://*.example.com/
-                r'^\*://\*?\.?[a-zA-Z0-9.-]+/\*?$',                 # *://*.example.com/* 
+                r'^\*://\*?\.?[a-zA-Z0-9.-]+/\*?$',                 # *://*.example.com/*
                 r'^\*://[a-zA-Z0-9.-]+/?$',                         # *://example.com 或 *://example.com/
                 r'^\*://[a-zA-Z0-9.-]+/\*?$',                       # *://example.com/*
                 r'^\|\|[a-zA-Z0-9.-]+\^?$',                         # ||example.com^
                 r'^[a-zA-Z0-9.-]+/?$',                              # example.com 或 example.com/
                 r'^[a-zA-Z0-9.-]+/\*?$',                            # example.com/* 或 example.com/
             ]
-            
+
             # 检查是否匹配域名级别模式
             for pattern in domain_level_patterns:
                 if re.match(pattern, url_string):
@@ -210,7 +208,7 @@ class SearXNGHostnamesGenerator:
                     if self._has_specific_path(url_string):
                         return False
                     return True
-            
+
             return False
         else:
             # 兼容模式（原来的逻辑）
@@ -231,10 +229,10 @@ class SearXNGHostnamesGenerator:
     def _has_specific_path(self, url_string: str) -> bool:
         """
         检查URL是否包含具体的路径（非域名级别）
-        
+
         Args:
             url_string: URL字符串
-            
+
         Returns:
             是否包含具体路径
         """
@@ -245,7 +243,7 @@ class SearXNGHostnamesGenerator:
             url_part = url_string[2:].rstrip('^')
         else:
             url_part = url_string
-            
+
         # 检查是否有路径部分
         if '/' in url_part:
             domain_and_path = url_part.split('/', 1)
@@ -254,13 +252,12 @@ class SearXNGHostnamesGenerator:
                 # 如果路径不是空、单个*或空字符串，则认为是具体路径
                 if path_part and path_part not in ['', '*']:
                     return True
-                    
+
         return False
 
     def extract_domain_from_rule(self, rule: str) -> str:
         """
         从规则中提取域名
-        修复版本：更好地处理路径规则
 
         Args:
             rule: 规则字符串
@@ -305,29 +302,28 @@ class SearXNGHostnamesGenerator:
     def _extract_domain_from_path_rule(self, rule: str) -> str:
         """
         从包含路径的规则中提取域名
-        这个函数更加谨慎，避免过度泛化
-        
+
         Args:
             rule: 包含路径的规则字符串
-            
+
         Returns:
             域名或 None
         """
         rule = rule.strip()
-        
+
         # 对于包含具体路径的规则，我们通常不提取域名
         # 除非用户明确配置允许
         if self.config["parsing"]["ignore_specific_paths"]:
             return None
-            
+
         # 如果用户允许处理路径规则，使用更精确的模式
         path_patterns = [
             # *://*.subdomain.domain.com/path/* -> 提取 subdomain.domain.com
             r'^\*://\*\.([a-zA-Z0-9.-]+)/[^/]+',
-            # *://subdomain.domain.com/path/* -> 提取 subdomain.domain.com  
+            # *://subdomain.domain.com/path/* -> 提取 subdomain.domain.com
             r'^\*://([a-zA-Z0-9.-]+)/[^/]+',
         ]
-        
+
         for pattern in path_patterns:
             match = re.match(pattern, rule)
             if match:
@@ -335,7 +331,7 @@ class SearXNGHostnamesGenerator:
                 # 只有当这是一个子域名时才返回，避免提取主域名
                 if '.' in domain and len(domain.split('.')) >= 2:
                     return domain
-                    
+
         return None
 
     def parse_ublock_rule(self, rule: str) -> Tuple[str, str]:
@@ -746,6 +742,7 @@ class SearXNGHostnamesGenerator:
     def create_advanced_tld_regex(self, tld_domains: List[str], tld: str) -> str:
         """
         为同一TLD的域名创建高级优化正则表达式
+        修复版本：确保TLD不会丢失
 
         Args:
             tld_domains: 同一TLD的域名列表（已排序）
@@ -773,12 +770,113 @@ class SearXNGHostnamesGenerator:
         # 尝试找到公共模式
         optimized_pattern = self.optimize_domain_bases(domain_bases)
 
-        # 如果所有域名基础部分都不包含点，说明都是二级域名，可以进行TLD优化
-        if all('.' not in base for base in domain_bases):
+        # 检查域名基础部分的结构
+        simple_domains = [base for base in domain_bases if '.' not in base]  # 二级域名
+        complex_domains = [base for base in domain_bases if '.' in base]     # 多级域名
+
+        if len(simple_domains) == len(domain_bases):
+            # 所有都是二级域名，可以进行TLD优化
             return f"({optimized_pattern})\\.{re.escape(tld)}"
+        elif len(complex_domains) == len(domain_bases):
+            # 所有都是多级域名，需要检查是否有公共的二级+TLD后缀
+            return self._optimize_complex_domains_with_tld(domain_bases, tld)
         else:
-            # 混合情况，有些是多级域名，直接使用完整域名
-            return optimized_pattern
+            # 混合情况：二级域名+多级域名
+            return self._optimize_mixed_domains_with_tld(simple_domains, complex_domains, tld)
+
+    def _optimize_complex_domains_with_tld(self, domain_bases: List[str], tld: str) -> str:
+        """
+        优化多级域名，确保保留TLD
+
+        Args:
+            domain_bases: 域名基础部分列表（都是多级域名）
+            tld: 顶级域名
+
+        Returns:
+            优化后的正则表达式
+        """
+        # 检查是否有公共的二级域名+TLD模式
+        # 例如：a.pixnet.net, b.pixnet.net -> (a|b).pixnet.net
+
+        # 找到所有域名的公共后缀（不包括第一部分）
+        if len(domain_bases) <= 1:
+            if domain_bases:
+                return f"{re.escape(domain_bases[0])}\\.{re.escape(tld)}"
+            return f".*\\.{re.escape(tld)}"
+
+        # 分析结构：检查是否所有域名都有相同的后缀结构
+        common_suffix_parts = None
+        prefixes = []
+
+        for base in domain_bases:
+            parts = base.split('.')
+            if common_suffix_parts is None:
+                # 第一个域名，设置公共后缀候选
+                if len(parts) >= 2:
+                    common_suffix_parts = parts[1:]  # 除了第一部分的其余部分
+                    prefixes.append(parts[0])
+                else:
+                    # 处理异常情况
+                    common_suffix_parts = []
+                    prefixes.append(base)
+            else:
+                # 检查是否与公共后缀匹配
+                if len(parts) >= len(common_suffix_parts) + 1:
+                    current_suffix = parts[-(len(common_suffix_parts)):]
+                    if current_suffix == common_suffix_parts:
+                        prefixes.append(parts[0])
+                    else:
+                        # 后缀不匹配，无法优化，直接返回完整域名列表
+                        escaped_bases = [re.escape(base) for base in domain_bases]
+                        return f"({'|'.join(escaped_bases)})\\.{re.escape(tld)}"
+                else:
+                    # 长度不够，无法优化
+                    escaped_bases = [re.escape(base) for base in domain_bases]
+                    return f"({'|'.join(escaped_bases)})\\.{re.escape(tld)}"
+
+        # 如果找到了公共后缀，进行优化
+        if common_suffix_parts and len(set(prefixes)) > 1:
+            # 优化前缀部分
+            optimized_prefixes = self.optimize_domain_bases(prefixes)
+            escaped_suffix = '\\.'.join(re.escape(part) for part in common_suffix_parts)
+            return f"({optimized_prefixes})\\.{escaped_suffix}\\.{re.escape(tld)}"
+        else:
+            # 无法找到公共模式，使用基础优化
+            optimized_pattern = self.optimize_domain_bases(domain_bases)
+            return f"({optimized_pattern})\\.{re.escape(tld)}"
+
+    def _optimize_mixed_domains_with_tld(self, simple_domains: List[str], complex_domains: List[str], tld: str) -> str:
+        """
+        优化混合域名（二级+多级），确保保留TLD
+
+        Args:
+            simple_domains: 二级域名列表
+            complex_domains: 多级域名列表
+            tld: 顶级域名
+
+        Returns:
+            优化后的正则表达式
+        """
+        patterns = []
+
+        # 处理二级域名
+        if simple_domains:
+            if len(simple_domains) == 1:
+                patterns.append(f"{re.escape(simple_domains[0])}\\.{re.escape(tld)}")
+            else:
+                optimized_simple = self.optimize_domain_bases(simple_domains)
+                patterns.append(f"({optimized_simple})\\.{re.escape(tld)}")
+
+        # 处理多级域名
+        if complex_domains:
+            complex_pattern = self._optimize_complex_domains_with_tld(complex_domains, tld)
+            patterns.append(complex_pattern)
+
+        # 合并所有模式
+        if len(patterns) == 1:
+            return patterns[0]
+        else:
+            return f"({'|'.join(patterns)})"
 
     def optimize_domain_bases(self, domain_bases: List[str]) -> str:
         """
@@ -855,6 +953,14 @@ class SearXNGHostnamesGenerator:
             print(f"  📊 TLD分布情况:")
             for tld, tld_domains in sorted(tld_groups.items(), key=lambda x: len(x[1]), reverse=True):
                 print(f"    .{tld}: {len(tld_domains)} 个域名")
+                # 显示一些域名样本
+                if len(tld_domains) <= 3:
+                    for domain in tld_domains:
+                        print(f"      - {domain}")
+                else:
+                    for domain in tld_domains[:3]:
+                        print(f"      - {domain}")
+                    print(f"      - ... 还有 {len(tld_domains)-3} 个域名")
 
             for tld, tld_domains in tld_groups.items():
                 if len(tld_domains) == 1:
@@ -1247,7 +1353,7 @@ class SearXNGHostnamesGenerator:
                         domain_count = self.category_domain_counts.get(rule_type, 0)
 
                         f.write(f"# SearXNG {rule_type} rules\n")
-                        f.write(f"# Generated by SearXNG Hostnames Generator (Enhanced - Fixed Path Rules)\n")
+                        f.write(f"# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues)\n")
                         f.write(f"# Total rules: {rule_count}\n")
                         f.write(f"# Total domains: {domain_count}\n")
 
@@ -1262,7 +1368,7 @@ class SearXNGHostnamesGenerator:
                             f.write(f"# Multi-rule performance optimized with advanced pattern matching\n")
 
                         f.write(f"# Note: Rules targeting specific paths are ignored to prevent over-blocking\n")
-                        f.write(f"# Fixed: Improved path rule detection to avoid domain extraction issues\n")
+                        f.write(f"# Fixed: TLD optimization now preserves complete domain structure\n")
                         f.write(f"# Smart domain sorting and TLD grouping applied for optimal performance\n\n")
 
                         # 直接写入规则内容，不包含顶级键
@@ -1283,14 +1389,14 @@ class SearXNGHostnamesGenerator:
                 with open(main_config_path, 'w', encoding='utf-8') as f:
                     f.write("# SearXNG hostnames configuration\n")
                     f.write("# This file references external rule files\n")
-                    f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed Path Rules)\n")
+                    f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues)\n")
 
                     if self.force_single_regex or self.config["optimization"].get("force_single_regex", False):
                         f.write("# Advanced TLD-optimized single-line regex mode enabled\n")
                     else:
                         f.write("# Multi-rule performance optimized with advanced pattern matching\n")
 
-                    f.write("# Fixed: Improved path rule detection to avoid CSDN-like issues\n")
+                    f.write("# Fixed: TLD optimization preserves complete domain structure (.pixnet.net vs .pixnet)\n")
                     f.write("# Smart domain sorting and TLD grouping applied\n\n")
                     yaml.dump(main_config, f, default_flow_style=False, allow_unicode=True, indent=2)
                 print(f"已保存主配置到: {main_config_path}")
@@ -1315,7 +1421,7 @@ class SearXNGHostnamesGenerator:
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write("# SearXNG hostnames configuration\n")
-                f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed Path Rules)\n")
+                f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues)\n")
 
                 # 添加总体统计信息
                 total_rules = sum(len(rule_data) if isinstance(rule_data, (list, dict)) else 0 for rule_data in rules.values())
@@ -1333,7 +1439,7 @@ class SearXNGHostnamesGenerator:
                     f.write("# Multi-rule performance optimized with advanced pattern matching\n")
 
                 f.write("# Note: Rules targeting specific paths are ignored to prevent over-blocking\n")
-                f.write("# Fixed: Improved path rule detection to avoid CSDN-like domain extraction issues\n")
+                f.write("# Fixed: TLD optimization now preserves complete domain structure (*.pixnet.net vs *.pixnet)\n")
                 f.write("# Smart domain sorting and TLD grouping applied for optimal performance\n\n")
                 yaml.dump(hostnames_config, f, default_flow_style=False, allow_unicode=True, indent=2)
 
@@ -1346,7 +1452,7 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 (高级优化版 - 修复路径规则)")
+        print("SearXNG Hostnames 规则生成器启动 (高级优化版 - 修复TLD问题)")
         print("=" * 70)
 
         try:
@@ -1477,9 +1583,10 @@ class SearXNGHostnamesGenerator:
                     print(f"  - {rule_type}: {category_ratio:.1f}% ({domain_count} 个域名 -> {rule_count} 条规则)")
 
         print(f"\n🔧 修复说明:")
-        print(f"  - 修复了路径规则误判问题，如 '*://*.csdn.net/tags/*' 现在会被正确忽略")
-        print(f"  - 改进了域名提取逻辑，避免从路径规则中错误提取主域名")
-        print(f"  - 启用了严格的域名级别检查，提高规则生成的准确性")
+        print(f"  - 修复了TLD优化中丢失顶级域名的问题")
+        print(f"  - 现在 'a0cuy6cmk2.pixnet.net' 会正确生成为 '*.pixnet.net$' 而不是 '*.pixnet$'")
+        print(f"  - 改进了多级域名的TLD分组和优化逻辑")
+        print(f"  - 增强了域名结构分析，确保TLD完整性")
 
 
 def create_sample_config():
@@ -1537,7 +1644,7 @@ def create_sample_config():
             "ignore_specific_paths": True,
             "ignore_ip": True,
             "ignore_localhost": True,
-            "strict_domain_level_check": True  # 新增：严格检查域名级别规则
+            "strict_domain_level_check": True
         },
         "optimization": {
             "merge_domains": True,
@@ -1579,7 +1686,7 @@ def create_sample_config():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (高级优化版 - 修复路径规则)")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (高级优化版 - 修复TLD问题)")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--create-config", action="store_true", help="创建示例配置文件")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式（将所有域名合并为一个规则）")
