@@ -3,3 +3,6 @@ baidu.com
 
 # @content-farm-terminator/extra-content-farms 过度匹配
 csdn.net
+
+# @content-farm-terminator/extra-content-farms 过度匹配
+dingtalk.com
