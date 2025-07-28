@@ -94,14 +94,21 @@ class SearXNGHostnamesGenerator:
                     "enabled": True
                 },
                 {
-                    "name": "Google Chinese Results Blocklist",
+                    "name": "Paxxs - Google Blocklist",
+                    "url": "https://raw.githubusercontent.com/Paxxs/Google-Blocklist/refs/heads/develop/uBlacklist_subscription.txt",
+                    "action": "remove",
+                    "format": "ublock",
+                    "enabled": True
+                },
+                {
+                    "name": "cobaltdisco - Google Chinese Results Blocklist",
                     "url": "https://raw.githubusercontent.com/cobaltdisco/Google-Chinese-Results-Blocklist/refs/heads/master/uBlacklist_subscription.txt",
                     "action": "remove",
                     "format": "ublock",
                     "enabled": True
                 },
                 {
-                    "name": "Chinese Internet is Dead",
+                    "name": "obgnail - Chinese Internet is Dead",
                     "url": "https://raw.githubusercontent.com/obgnail/chinese-internet-is-dead/master/blocklist.txt",
                     "action": "remove",
                     "format": "ublock",
