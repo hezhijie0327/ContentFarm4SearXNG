@@ -1,7 +1,7 @@
 # @content-farm-terminator/extra-content-farms 过度匹配
 baidu.com
 
-# @content-farm-terminator/extra-content-farms @cobaltdisco/Google-Chinese-Results-Blocklist 过度匹配
+# @content-farm-terminator/extra-content-farms @cobaltdisco/Google-Chinese-Results-Blocklist @Paxxs/Google-Blocklist 过度匹配
 csdn.net
 
 # @content-farm-terminator/extra-content-farms 过度匹配
