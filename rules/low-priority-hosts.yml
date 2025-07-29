@@ -1,5 +1,14 @@
 # SearXNG low_priority rules
-# Total rules: 2, Total domains: 2
+# Total rules: 11, Total domains: 116
 
-- (.*\.)?csdn\.net$
-- (.*\.)?zhihu\.com$
+- (.*\.)?((aixcoder|apifox|asktug|baltamatica|chinauos|cnitblog|cnweblog|cppblog|csdn|csto|deepin|dengguobi|frontjs|gitcode|gitee|gneec|gneec3|gneec4|gneec7|harmonyos|hiascend|hiclc|hikunpeng|hisilicon|houyicaiji|huaweiapaas|iteye|jinglingbiaozhu|jinrishici|kaifayun|nnthink|openmidas|owsgo|pgyer|pingcap|qqgamedesign|segmentfault|sifou|teleows|tencent\-cloud|tencentcloud|tidbcloud|tjstats|tracup|ubuntukylin|uniontech|wegamedeveloper|weixinbridge|xueyuanjun|zhihu)\.com|((p1|p2|p3|p4|p5|p6|p7|p8|p9)\-juejin)\.byteimg\.com)$
+- (.*\.)?((apifox|apipost|baltamatica|bisheng|bishengcompiler|csdnimg|datasea|deepin|gitbook|gitchat|goproxy|hiascend|hikunpeng|juejin|mindspore|mysxl|pingcap|sxl|sxlcdn|tencent\-cloud)\.cn|(baltamatica\.org|csdn\.net|gneec\.com|hikunpeng\.com|hisilicon\.com|programmer\.com|programmer\.net)\.cn)$
+- (.*\.)?(apipost|baltamatica|blogjava|codechina|coding|csdn|gitcode|hikunpeng|oschina|phpweblog|teachblog|tidb)\.net$
+- (.*\.)?(deepin|gitee|goproxy|weui|xitu)\.io$
+- (.*\.)?(deepin|ruby\-china|rubyconfchina|tikv|tipdim)\.org$
+- (.*\.)?(devui|qq|tencent)\.design$
+- (.*\.)?coding\.me$
+- (.*\.)?juejin\.im$
+- (.*\.)?openkylin\.top$
+- (.*\.)?saasops\.tech$
+- (.*\.)?tidb\.ai$
