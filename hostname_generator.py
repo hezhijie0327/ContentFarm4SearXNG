@@ -3,7 +3,7 @@
 SearXNG Hostnames 规则生成器 - 完善版
 - 支持低优先级/高优先级/替换规则从外部文件读取
 - 白名单功能改为自动分类语法功能，支持 remove:baidu.com 等语法
-- 修复：自动分类规则中的域名会被主动添加，而不仅仅是重新分类现有域名
+- 修复：skip 规则只影响数据源处理，不阻止明确的自动分类规则
 
 pip install requests pyyaml argparse
 """
@@ -41,7 +41,9 @@ class SearXNGHostnamesGenerator:
             'duplicate_domains': 0,
             'ignored_comments': 0,
             'auto_classified': 0,  # 自动分类的数量
-            'auto_added': 0  # 主动添加的域名数量
+            'auto_added': 0,  # 主动添加的域名数量
+            'skipped_from_sources': 0,  # 从数据源跳过的域名数量
+            'skip_overridden': 0  # skip 规则被其他规则覆盖的数量
         }
         # 记录每个类别的域名数量
         self.category_domain_counts = {
@@ -135,7 +137,7 @@ class SearXNGHostnamesGenerator:
                     # "low_priority:google.com",      # 将 google.com 添加到低优先级列表
                     # "high_priority:wikipedia.org",  # 将 wikipedia.org 添加到高优先级列表
                     # "replace:youtube.com=yt.example.com",  # 替换规则
-                    # "skip:baidu.com",               # 跳过处理此域名（从所有源中移除）
+                    # "skip:baidu.com",               # 跳过从数据源处理此域名（但不阻止其他自动分类规则）
                 ]
             },
 
@@ -510,9 +512,10 @@ class SearXNGHostnamesGenerator:
 
         return domains, replace_rules, stats
 
-    def should_skip_domain(self, domain: str, source_name: str = None) -> Tuple[bool, str]:
+    def should_skip_domain_from_source(self, domain: str, source_name: str = None) -> Tuple[bool, str]:
         """
-        检查域名是否应该被跳过处理
+        检查域名是否应该从数据源处理中跳过
+        注意：这只影响数据源的默认处理，不影响明确的自动分类规则
 
         Args:
             domain: 要检查的域名
@@ -535,10 +538,10 @@ class SearXNGHostnamesGenerator:
                     # 通配符匹配子域名
                     pattern_domain = rule_domain[2:]  # 移除 *.
                     if domain_lower == pattern_domain or domain_lower.endswith('.' + pattern_domain):
-                        return True, f"自动分类跳过规则: {rule['domain']}"
+                        return True, f"自动分类跳过规则: {rule['domain']} (仅影响数据源处理)"
                 elif domain_lower == rule_domain:
                     # 精确匹配
-                    return True, f"自动分类跳过规则: {rule['domain']}"
+                    return True, f"自动分类跳过规则: {rule['domain']} (仅影响数据源处理)"
 
         return False, ""
 
@@ -573,10 +576,43 @@ class SearXNGHostnamesGenerator:
 
         return None, ""
 
+    def get_all_auto_classify_actions_for_domain(self, domain: str) -> List[Tuple[str, str]]:
+        """
+        获取域名的所有自动分类动作（用于检测冲突和优先级处理）
+
+        Args:
+            domain: 域名
+
+        Returns:
+            (动作类型, 匹配原因) 的列表
+        """
+        if not self.auto_classify_rules:
+            return []
+
+        domain_lower = domain.lower()
+        actions = []
+
+        for rule in self.auto_classify_rules:
+            if rule['action'] in ['remove', 'low_priority', 'high_priority', 'skip']:
+                rule_domain = rule['domain'].lower()
+
+                # 支持通配符匹配
+                if rule_domain.startswith('*.'):
+                    # 通配符匹配子域名
+                    pattern_domain = rule_domain[2:]  # 移除 *.
+                    if domain_lower == pattern_domain or domain_lower.endswith('.' + pattern_domain):
+                        actions.append((rule['action'], f"自动分类规则: {rule['domain']}"))
+                elif domain_lower == rule_domain:
+                    # 精确匹配
+                    actions.append((rule['action'], f"自动分类规则: {rule['domain']}"))
+
+        return actions
+
     def apply_auto_classify_rules_directly(self, categorized_domains: Dict[str, Set[str]]) -> None:
         """
         直接应用自动分类规则中的域名（新增功能）
         不仅重新分类现有域名，还会主动添加规则中定义的域名
+        修复版本：skip 规则不会阻止其他明确的自动分类规则
 
         Args:
             categorized_domains: 分类后的域名字典
@@ -588,14 +624,19 @@ class SearXNGHostnamesGenerator:
 
         auto_added_count = 0
         auto_added_samples = []
+        skip_overridden_count = 0
+        skip_overridden_samples = []
 
         # 收集所有已存在的域名（用于跳过重复）
         all_existing_domains = set()
         for domain_set in categorized_domains.values():
             all_existing_domains.update(d.lower() for d in domain_set)
 
+        # 按域名分组处理所有规则，以便处理冲突
+        domain_rules_map = defaultdict(list)
+
         for rule in self.auto_classify_rules:
-            if rule['action'] in ['remove', 'low_priority', 'high_priority']:
+            if rule['action'] in ['remove', 'low_priority', 'high_priority', 'skip']:
                 domain = rule['domain']
 
                 # 处理通配符域名
@@ -608,22 +649,10 @@ class SearXNGHostnamesGenerator:
                 if not cleaned_domain:
                     continue
 
-                # 检查是否已存在
-                if cleaned_domain.lower() in all_existing_domains:
-                    continue
-
-                # 添加到相应类别
-                action = rule['action']
-                if action in categorized_domains:
-                    categorized_domains[action].add(cleaned_domain)
-                    all_existing_domains.add(cleaned_domain.lower())
-                    auto_added_count += 1
-
-                    if len(auto_added_samples) < 5:  # 显示前5个样本
-                        auto_added_samples.append(f"{cleaned_domain} -> {action}")
+                domain_rules_map[cleaned_domain].append(rule)
 
             elif rule['action'] == 'replace':
-                # 处理替换规则 - 这里我们需要确保替换规则被添加到配置中
+                # 处理替换规则
                 old_domain = rule['old_domain']
                 new_domain = rule['new_domain']
 
@@ -637,6 +666,38 @@ class SearXNGHostnamesGenerator:
                     if len(auto_added_samples) < 5:
                         auto_added_samples.append(f"{cleaned_old_domain} -> {new_domain} (替换)")
 
+        # 处理每个域名的规则
+        for domain, rules in domain_rules_map.items():
+            # 检查是否已存在
+            if domain.lower() in all_existing_domains:
+                continue
+
+            # 分析规则优先级
+            has_skip = any(r['action'] == 'skip' for r in rules)
+            non_skip_rules = [r for r in rules if r['action'] != 'skip']
+
+            if non_skip_rules:
+                # 有非 skip 的规则，优先处理这些规则
+                # 如果有多个非 skip 规则，取最后一个（或者可以根据优先级排序）
+                effective_rule = non_skip_rules[-1]  # 取最后一个规则
+
+                action = effective_rule['action']
+                if action in categorized_domains:
+                    categorized_domains[action].add(domain)
+                    all_existing_domains.add(domain.lower())
+                    auto_added_count += 1
+
+                    if len(auto_added_samples) < 5:
+                        auto_added_samples.append(f"{domain} -> {action}")
+
+                    # 如果同时有 skip 规则，记录覆盖情况
+                    if has_skip:
+                        skip_overridden_count += 1
+                        if len(skip_overridden_samples) < 3:
+                            skip_overridden_samples.append(f"{domain} (skip 被 {action} 覆盖)")
+
+            # 如果只有 skip 规则，不做任何处理（但不是错误）
+
         if auto_added_count > 0:
             print(f"  ✅ 主动添加了 {auto_added_count} 个域名到相应类别")
             self.stats['auto_added'] = auto_added_count
@@ -644,7 +705,16 @@ class SearXNGHostnamesGenerator:
             print(f"  📝 添加的域名样本:")
             for sample in auto_added_samples:
                 print(f"    + {sample}")
-        else:
+
+        if skip_overridden_count > 0:
+            print(f"  🔄 skip 规则被覆盖: {skip_overridden_count} 个域名")
+            self.stats['skip_overridden'] = skip_overridden_count
+
+            print(f"  📝 覆盖情况样本:")
+            for sample in skip_overridden_samples:
+                print(f"    ⚡ {sample}")
+
+        if auto_added_count == 0 and skip_overridden_count == 0:
             print(f"  ℹ️  没有需要主动添加的域名")
 
     def is_domain_level_rule(self, url_string: str) -> bool:
@@ -923,8 +993,8 @@ class SearXNGHostnamesGenerator:
                                     ignore_reason = None if domain else "无效域名"
 
                         if domain:
-                            # 检查是否应该跳过此域名
-                            should_skip, skip_reason = self.should_skip_domain(domain, source_name)
+                            # 检查是否应该从数据源跳过此域名
+                            should_skip, skip_reason = self.should_skip_domain_from_source(domain, source_name)
                             if should_skip:
                                 stats['skipped_domains'] += 1
                                 if len(skip_samples) < 3:
@@ -1669,7 +1739,9 @@ class SearXNGHostnamesGenerator:
             'ignored_comments': 0,
             'auto_classified': 0,
             'skipped_domains': 0,
-            'auto_added': 0
+            'auto_added': 0,
+            'skipped_from_sources': 0,
+            'skip_overridden': 0
         }
 
         # 从在线源收集域名
@@ -1710,6 +1782,9 @@ class SearXNGHostnamesGenerator:
             if auto_classified_count > 0:
                 print(f"  ✅ 自动分类处理: {auto_classified_count} 个域名")
                 self.stats['auto_classified'] += auto_classified_count
+
+            # 记录从数据源跳过的域名数量
+            self.stats['skipped_from_sources'] += source_stats.get('skipped_domains', 0)
 
             print(f"已添加 {len(domains)} 个域名到 {source_action} 类别")
 
@@ -1972,11 +2047,14 @@ class SearXNGHostnamesGenerator:
 
                         f.write(f"# Features: Auto-classification, custom rule files, TLD optimization\n")
                         f.write(f"# Rules targeting specific paths are ignored to prevent over-blocking\n")
+                        f.write(f"# Fixed: skip rules only affect source processing, not explicit auto-classification\n")
 
                         # 添加自动分类信息
                         if self.config.get("auto_classify", {}).get("enabled", False):
                             f.write(f"# Auto-classification enabled - {self.stats.get('auto_classified', 0)} domains auto-classified\n")
                             f.write(f"# Auto-added domains - {self.stats.get('auto_added', 0)} domains directly added from rules\n")
+                            if self.stats.get('skip_overridden', 0) > 0:
+                                f.write(f"# Skip overrides - {self.stats.get('skip_overridden', 0)} domains had skip rules overridden\n")
 
                         # 添加自定义文件信息
                         if self.config.get("custom_rules", {}).get("enabled", False):
@@ -2019,12 +2097,15 @@ class SearXNGHostnamesGenerator:
 
                     f.write("# Fixed: TLD optimization preserves complete domain structure\n")
                     f.write("# Fixed: Auto-classification rules now actively add domains\n")
+                    f.write("# Fixed: skip rules only affect source processing, not explicit auto-classification\n")
 
                     # 添加功能信息
                     if self.config.get("auto_classify", {}).get("enabled", False):
                         f.write("# Auto-classification enabled for intelligent rule sorting\n")
                         f.write(f"# Auto-classified domains: {self.stats.get('auto_classified', 0)}\n")
                         f.write(f"# Auto-added domains: {self.stats.get('auto_added', 0)}\n")
+                        if self.stats.get('skip_overridden', 0) > 0:
+                            f.write(f"# Skip overrides: {self.stats.get('skip_overridden', 0)}\n")
 
                     if self.config.get("custom_rules", {}).get("enabled", False):
                         f.write("# Custom rule files enabled for external rule management\n")
@@ -2082,11 +2163,14 @@ class SearXNGHostnamesGenerator:
                 f.write("# Features: Auto-classification, custom rule files, TLD optimization\n")
                 f.write("# Rules targeting specific paths are ignored to prevent over-blocking\n")
                 f.write("# Fixed: Auto-classification rules now actively add domains\n")
+                f.write("# Fixed: skip rules only affect source processing, not explicit auto-classification\n")
 
                 # 添加功能信息
                 if self.config.get("auto_classify", {}).get("enabled", False):
                     f.write(f"# Auto-classification enabled - {self.stats.get('auto_classified', 0)} domains auto-classified\n")
                     f.write(f"# Auto-added domains - {self.stats.get('auto_added', 0)} domains directly added from rules\n")
+                    if self.stats.get('skip_overridden', 0) > 0:
+                        f.write(f"# Skip overrides - {self.stats.get('skip_overridden', 0)} domains had skip rules overridden\n")
 
                 if self.config.get("custom_rules", {}).get("enabled", False):
                     f.write(f"# Custom rule files enabled - supports external rule management\n")
@@ -2104,7 +2188,7 @@ class SearXNGHostnamesGenerator:
         运行生成器
         """
         print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化)")
-        print("🔧 修复版本：自动分类规则现在会主动添加域名")
+        print("🔧 修复版本：skip 规则只影响数据源处理，不阻止明确的自动分类规则")
         print("=" * 90)
 
         try:
@@ -2173,7 +2257,8 @@ class SearXNGHostnamesGenerator:
         print(f"  - 重复域名: {self.stats['duplicate_domains']:,}")
         print(f"  - 自动分类处理: {self.stats.get('auto_classified', 0):,}")
         print(f"  - 🆕 主动添加域名: {self.stats.get('auto_added', 0):,}")
-        print(f"  - 跳过域名: {self.stats.get('skipped_domains', 0):,}")
+        print(f"  - 🔄 从数据源跳过: {self.stats.get('skipped_from_sources', 0):,}")
+        print(f"  - 🔄 skip 规则被覆盖: {self.stats.get('skip_overridden', 0):,}")
 
         print(f"\n📁 输出目录: {self.config['output']['directory']}")
 
@@ -2200,7 +2285,8 @@ class SearXNGHostnamesGenerator:
             print(f"  - 总计规则: {len(self.auto_classify_rules)} 个")
             print(f"  - 重新分类域名: {self.stats.get('auto_classified', 0):,} 个")
             print(f"  - 🆕 主动添加域名: {self.stats.get('auto_added', 0):,} 个")
-            print(f"  - 跳过域名: {self.stats.get('skipped_domains', 0):,} 个")
+            print(f"  - 🔄 从数据源跳过: {self.stats.get('skipped_from_sources', 0):,} 个")
+            print(f"  - 🔄 skip 规则覆盖: {self.stats.get('skip_overridden', 0):,} 个")
         else:
             print(f"  - 状态: 已禁用")
 
@@ -2270,30 +2356,34 @@ class SearXNGHostnamesGenerator:
                     print(f"  - {rule_type}: {domain_count} 个域名 -> {rule_count} 条规则")
 
         print(f"\n🆕 主要修复:")
+        print(f"  - ✅ skip 规则现在只影响数据源处理，不阻止明确的自动分类规则")
+        print(f"  - ✅ 如果同一域名有 skip 和其他规则，其他规则会覆盖 skip")
         print(f"  - ✅ 自动分类规则现在会主动添加域名到相应类别")
-        print(f"  - ✅ 即使没有从数据源获取的域名，也会处理自动分类规则中的域名")
         print(f"  - ✅ 确保所有类别的规则文件都会被创建（即使为空）")
-        print(f"  - ✅ 修复了高优先级、低优先级规则不生成的问题")
+
+        if self.stats.get('skip_overridden', 0) > 0:
+            print(f"\n🔄 Skip 规则覆盖详情:")
+            print(f"  - 有 {self.stats.get('skip_overridden', 0)} 个域名的 skip 规则被其他自动分类规则覆盖")
+            print(f"  - 这意味着这些域名不会从数据源跳过，但会被添加到指定类别")
+            print(f"  - 这正是期望的行为：明确的分类规则优先级高于 skip 规则")
+
+        print(f"\n🔧 修复后的 Skip 规则行为:")
+        print(f"  - skip:csdn.net - 只会从数据源的默认处理中跳过 csdn.net")
+        print(f"  - low_priority:csdn.net - 会主动将 csdn.net 添加到低优先级列表")
+        print(f"  - 如果同时存在，low_priority 规则会生效，skip 被覆盖")
 
         print(f"\n🔧 自动分类语法示例:")
-        print(f"  - remove:baidu.com          # 将 baidu.com 添加到移除列表")
-        print(f"  - low_priority:google.com   # 将 google.com 添加到低优先级列表")
+        print(f"  - skip:csdn.net              # 从数据源跳过（但不阻止其他规则）")
+        print(f"  - low_priority:csdn.net      # 添加到低优先级（会覆盖 skip）")
+        print(f"  - remove:baidu.com           # 将 baidu.com 添加到移除列表")
         print(f"  - high_priority:wikipedia.org # 将 wikipedia.org 添加到高优先级列表")
         print(f"  - replace:youtube.com=yt.example.com # 替换规则")
-        print(f"  - skip:github.com           # 跳过 github.com，不进行任何处理")
-        print(f"  - remove:*.csdn.net         # 移除所有 CSDN 子域名")
 
         print(f"\n📁 自定义文件格式支持:")
         print(f"  - domain: 纯域名格式 (每行一个域名)")
         print(f"  - regex: 正则表达式格式 (直接使用的正则)")
         print(f"  - ublock: uBlock Origin 格式")
         print(f"  - replace: 替换格式 (old_domain=new_domain)")
-
-        if self.stats.get('auto_added', 0) > 0:
-            print(f"\n🎯 自动添加详情:")
-            print(f"  - 主动添加的域名主要来自自动分类规则")
-            print(f"  - 这些域名即使不在数据源中也会被处理")
-            print(f"  - 这解决了之前高优先级/低优先级规则不生成的问题")
 
 
 def create_sample_config():
@@ -2464,10 +2554,15 @@ high_priority:*.wikipedia.org
 replace:youtube.com=yt.example.com
 replace:twitter.com=nitter.example.com
 
-# 跳过规则 - 跳过处理这些域名
+# 跳过规则 - 只跳过数据源处理，不阻止明确的自动分类规则
 skip:github.com
 skip:*.github.com
 skip:stackoverflow.com
+
+# 示例：同时有 skip 和 low_priority 规则
+# skip 规则会被 low_priority 覆盖，域名会被添加到低优先级列表
+skip:csdn.net
+low_priority:csdn.net
 """)
 
     # 创建示例自定义规则文件
@@ -2492,13 +2587,18 @@ another.old.com=another.new.com
     print("示例自动分类文件已创建: auto_classify.txt")
     print("示例自定义规则文件已创建: custom_remove.txt, custom_replace.txt")
 
-    print("\n🔄 自动分类语法说明:")
+    print("\n🔄 修复后的自动分类语法说明:")
+    print("  - skip:domain.com            # 只从数据源跳过，不阻止其他规则")
     print("  - remove:domain.com          # 将域名添加到移除列表")
     print("  - low_priority:domain.com    # 将域名添加到低优先级列表")
     print("  - high_priority:domain.com   # 将域名添加到高优先级列表")
     print("  - replace:old.com=new.com    # 替换规则")
-    print("  - skip:domain.com            # 跳过处理此域名")
     print("  - remove:*.domain.com        # 支持通配符匹配子域名")
+
+    print("\n🔄 Skip 规则行为说明:")
+    print("  - skip 只影响从数据源的默认处理")
+    print("  - 如果同一域名有多个规则，明确的分类规则会覆盖 skip")
+    print("  - 例如：skip:csdn.net + low_priority:csdn.net = csdn.net 被添加到低优先级")
 
     print("\n📁 自定义文件格式说明:")
     print("  - domain: 纯域名格式，每行一个域名")
@@ -2507,14 +2607,9 @@ another.old.com=another.new.com
     print("  - replace: 替换格式，old_domain=new_domain")
     print("  - classify: 自动分类格式，action:domain")
 
-    print("\n🆕 修复说明:")
-    print("  - 自动分类规则现在会主动添加域名")
-    print("  - 即使域名不在数据源中，也会被处理")
-    print("  - 解决了高优先级/低优先级规则不生成的问题")
-
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化) - 修复版")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化) - Skip 修复版")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--create-config", action="store_true", help="创建示例配置文件和示例规则文件")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式")
