@@ -7,7 +7,7 @@
 # Rules targeting specific paths are ignored to prevent over-blocking
 # Fixed: skip rules only affect source processing, not explicit auto-classification
 # Auto-classification enabled - 0 domains auto-classified
-# Auto-added domains - 5 domains directly added from rules
+# Auto-added domains - 16 domains directly added from rules
 # Skip overrides - 1 domains had skip rules overridden
 
 {}
