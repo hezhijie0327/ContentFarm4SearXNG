@@ -8,7 +8,7 @@
 # Fixed: skip rules only affect source processing, not explicit auto-classification
 # Auto-classification enabled for intelligent rule sorting
 # Auto-classified domains: 0
-# Auto-added domains: 16
+# Auto-added domains: 17
 # Skip overrides: 1
 
 hostnames:
