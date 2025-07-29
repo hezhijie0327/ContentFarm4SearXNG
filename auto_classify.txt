@@ -24,16 +24,34 @@ skip:dingtalk.com
 # 高优先级规则 (High Priority Rules)
 # =============================================================================
 
-# For Program
+# 开发/技术类
 high_priority:github.com
 high_priority:stackoverflow.com
 high_priority:v2ex.com
 high_priority:cnblogs.com
 
+# 编程语言类
+high_priority:developer.mozilla.org
+high_priority:docs.python.org
+high_priority:nodejs.org
+high_priority:reactjs.org
+high_priority:vuejs.org
+
+# 百科/学术类
+high_priority:wikipedia.org
+high_priority:arxiv.org
+high_priority:scholar.google.com
+
+# 政府/教育机构类
+high_priority:edu.cn
+high_priority:gov.cn
+
 # =============================================================================
 # 低优先级规则 (Low Priority Rules)  
 # =============================================================================
+
 low_priority:csdn.net
+low_priority:zhihu.com
 
 # =============================================================================
 # 移除规则 (Remove Rules)
