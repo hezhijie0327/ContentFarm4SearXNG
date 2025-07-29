@@ -23,8 +23,12 @@ skip:dingtalk.com
 # =============================================================================
 # 高优先级规则 (High Priority Rules)
 # =============================================================================
+
+# For Program
 high_priority:github.com
 high_priority:stackoverflow.com
+high_priority:v2ex.com
+high_priority:cnblogs.com
 
 # =============================================================================
 # 低优先级规则 (Low Priority Rules)  
