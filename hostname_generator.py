@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-SearXNG Hostnames 规则生成器 - 完善版 (支持 v2ray 格式)
+SearXNG Hostnames 规则生成器 - 完善版 (支持 v2ray 格式 - 保持原始结构)
 - 支持低优先级/高优先级/替换规则从外部文件读取
 - 白名单功能改为自动分类语法功能，支持 remove:baidu.com 等语法
 - 修复：skip 规则只影响数据源处理，不阻止明确的自动分类规则
-- 新增：支持 v2ray 格式 (domain:example.com, full:example.com)
+- 新增：支持 v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)
+- 修正：保持原始域名结构，不移除 www. 等前缀
 
 pip install requests pyyaml argparse
 """
@@ -44,7 +45,8 @@ class SearXNGHostnamesGenerator:
             'auto_classified': 0,  # 自动分类的数量
             'auto_added': 0,  # 主动添加的域名数量
             'skipped_from_sources': 0,  # 从数据源跳过的域名数量
-            'skip_overridden': 0  # skip 规则被其他规则覆盖的数量
+            'skip_overridden': 0,  # skip 规则被其他规则覆盖的数量
+            'v2ray_with_tags': 0,  # 带标签的 v2ray 规则数量
         }
         # 记录每个类别的域名数量
         self.category_domain_counts = {
@@ -185,7 +187,9 @@ class SearXNGHostnamesGenerator:
                 "ignore_specific_paths": True,  # 忽略指向特定路径的规则
                 "ignore_ip": True,     # 忽略IP地址
                 "ignore_localhost": True,  # 忽略本地主机
-                "strict_domain_level_check": True  # 严格检查域名级别规则
+                "strict_domain_level_check": True,  # 严格检查域名级别规则
+                "preserve_www_prefix": True,  # 保持 www. 前缀
+                "preserve_original_structure": True  # 保持原始域名结构
             },
 
             # 性能优化配置
@@ -252,11 +256,13 @@ class SearXNGHostnamesGenerator:
 
     def parse_v2ray_rule(self, rule: str) -> Tuple[str, str]:
         """
-        解析 v2ray 格式规则，提取域名
+        解析 v2ray 格式规则，提取域名，保持原始结构
 
         支持的格式：
-        - domain:example.com  # 匹配域名及所有子域名
-        - full:example.com    # 完全匹配域名
+        - domain:example.com          # 匹配域名及所有子域名
+        - full:example.com            # 完全匹配域名
+        - domain:example.com:@tag     # 带标签的域名规则
+        - full:www.example.com:@tag   # 保持 www 前缀
 
         Args:
             rule: v2ray 规则字符串
@@ -264,7 +270,9 @@ class SearXNGHostnamesGenerator:
         Returns:
             (域名或 None, 忽略原因)
         """
+        original_rule = rule  # 保存原始规则用于调试
         rule = rule.strip()
+
         if not rule or rule.startswith('#'):
             return None, "注释或空行"
 
@@ -279,29 +287,98 @@ class SearXNGHostnamesGenerator:
         if ':' not in rule:
             return None, "非 v2ray 格式"
 
-        # 分离前缀和域名
-        parts = rule.split(':', 1)
-        if len(parts) != 2:
+        # 分离各部分：prefix:domain[:tag...]
+        parts = rule.split(':')
+        if len(parts) < 2:
             return None, "无效的 v2ray 格式"
 
         prefix = parts[0].strip().lower()
-        domain_part = parts[1].strip()
 
         # 验证前缀
         if prefix not in ['domain', 'full']:
             return None, f"不支持的 v2ray 前缀: {prefix}"
 
+        # 提取域名部分
+        domain_part = parts[1].strip()
+
         if not domain_part:
             return None, "域名部分为空"
 
-        # 清理和验证域名
-        cleaned_domain = self.clean_domain(domain_part)
+        # 处理标签部分（如果存在）
+        tag_info = None
+        if len(parts) > 2:
+            tag_parts = parts[2:]
+            # 检查是否有标签
+            tags = [part.strip() for part in tag_parts if part.strip()]
+            if tags:
+                tag_info = ':'.join(tags)
+                self.stats['v2ray_with_tags'] += 1
+                # 显示标签信息用于调试
+                print(f"    📝 v2ray 带标签: {original_rule} -> 域名: {domain_part}, 标签: {tag_info}")
+
+        # 验证和清理域名（保持原始结构）
+        cleaned_domain = self._clean_v2ray_domain(domain_part)
         if not cleaned_domain:
             return None, "无效域名"
 
-        # v2ray 的 domain 和 full 在这里都当作普通域名处理
-        # 因为 SearXNG 的正则会自动包含子域名匹配
         return cleaned_domain, None
+
+    def _clean_v2ray_domain(self, domain: str) -> str:
+        """
+        专门为 v2ray 域名清理的方法，保持原始结构
+
+        Args:
+            domain: v2ray 域名部分
+
+        Returns:
+            清理后的域名（保持原始结构）
+        """
+        if not domain:
+            return None
+
+        # 移除协议（如果意外包含）
+        if domain.startswith(('http://', 'https://')):
+            parsed = urlparse(domain)
+            domain = parsed.netloc
+            if parsed.port:
+                # 如果URL中有端口，移除它
+                domain = domain.replace(f':{parsed.port}', '')
+
+        # 对于 v2ray 格式，通常不应该有端口号
+        # 但如果有明显的数字端口则移除
+        if ':' in domain:
+            parts = domain.split(':')
+            if len(parts) == 2 and parts[1].isdigit() and int(parts[1]) <= 65535:
+                # 只有当第二部分是有效端口号时才移除
+                domain = parts[0]
+                print(f"    🔧 移除端口号: {':'.join(parts)} -> {domain}")
+
+        # 移除路径（如果意外包含）
+        if '/' in domain:
+            domain = domain.split('/')[0]
+
+        # **不移除 www. 前缀 - 保持原始结构**
+        # 这里注释掉原来的代码：
+        # if domain.startswith('www.'):
+        #     domain = domain[4:]
+
+        # 只移除明显无关的字符，保留域名的完整性
+        # 不使用激进的字符过滤，只移除明显的空白字符
+        domain = domain.strip()
+
+        # 检查是否是IP地址
+        if self.config["parsing"]["ignore_ip"] and self.is_ip_address(domain):
+            return None
+
+        # 检查是否是localhost
+        if self.config["parsing"]["ignore_localhost"] and domain in ['localhost', '127.0.0.1', '0.0.0.0']:
+            return None
+
+        # 验证域名格式
+        if self.is_valid_domain(domain):
+            return domain.lower()
+
+        return None
 
     def load_auto_classify_rules(self) -> None:
         """
@@ -498,7 +575,8 @@ class SearXNGHostnamesGenerator:
             'total_rules': 0,
             'parsed_domains': 0,
             'invalid_domains': 0,
-            'ignored_comments': 0
+            'ignored_comments': 0,
+            'v2ray_with_tags': 0
         }
 
         try:
@@ -582,7 +660,12 @@ class SearXNGHostnamesGenerator:
                     print(f"    ❌ 解析第 {line_num} 行时出错: {line[:50]}... - {e}")
                     stats['invalid_domains'] += 1
 
+            # 累加 v2ray 标签统计
+            stats['v2ray_with_tags'] = self.stats.get('v2ray_with_tags', 0)
+
             print(f"    ✅ 解析完成: {stats['parsed_domains']} 个有效规则")
+            if format_type == "v2ray" and stats['v2ray_with_tags'] > 0:
+                print(f"    📝 其中包含标签的规则: {stats['v2ray_with_tags']} 个")
             if stats['invalid_domains'] > 0:
                 print(f"    ⚠️  忽略了 {stats['invalid_domains']} 个无效规则")
 
@@ -725,8 +808,8 @@ class SearXNGHostnamesGenerator:
                     # 对于通配符规则，我们不直接添加，因为它们是匹配规则而不是具体域名
                     continue
 
-                # 清理域名
-                cleaned_domain = self.clean_domain(domain)
+                # 清理域名（使用保持原始结构的清理方法）
+                cleaned_domain = self.clean_domain_preserve_structure(domain)
                 if not cleaned_domain:
                     continue
 
@@ -737,7 +820,7 @@ class SearXNGHostnamesGenerator:
                 old_domain = rule['old_domain']
                 new_domain = rule['new_domain']
 
-                cleaned_old_domain = self.clean_domain(old_domain)
+                cleaned_old_domain = self.clean_domain_preserve_structure(old_domain)
                 if cleaned_old_domain and new_domain:
                     # 生成正则表达式格式的键
                     old_regex = f"(.*\\.)?{re.escape(cleaned_old_domain)}$"
@@ -797,6 +880,54 @@ class SearXNGHostnamesGenerator:
 
         if auto_added_count == 0 and skip_overridden_count == 0:
             print(f"  ℹ️  没有需要主动添加的域名")
+
+    def clean_domain_preserve_structure(self, domain: str) -> str:
+        """
+        清理域名但保持原始结构（用于自动分类规则）
+
+        Args:
+            domain: 原始域名字符串
+
+        Returns:
+            清理后的域名（保持结构）
+        """
+        if not domain:
+            return None
+
+        # 移除协议
+        if domain.startswith(('http://', 'https://')):
+            parsed = urlparse(domain)
+            domain = parsed.netloc
+
+        # 移除明显的端口号
+        if ':' in domain:
+            parts = domain.split(':')
+            if len(parts) == 2 and parts[1].isdigit():
+                domain = parts[0]
+
+        # 移除路径
+        if '/' in domain:
+            domain = domain.split('/')[0]
+
+        # **保持 www. 前缀**
+        # 不做任何前缀移除
+
+        # 只移除空白字符
+        domain = domain.strip()
+
+        # 检查是否是IP地址
+        if self.config["parsing"]["ignore_ip"] and self.is_ip_address(domain):
+            return None
+
+        # 检查是否是localhost
+        if self.config["parsing"]["ignore_localhost"] and domain in ['localhost', '127.0.0.1', '0.0.0.0']:
+            return None
+
+        # 验证域名格式
+        if self.is_valid_domain(domain):
+            return domain.lower()
+
+        return None
 
     def is_domain_level_rule(self, url_string: str) -> bool:
         """
@@ -1016,7 +1147,8 @@ class SearXNGHostnamesGenerator:
             'duplicate_domains': 0,
             'ignored_comments': 0,
             'auto_classified': 0,  # 自动分类处理的数量
-            'skipped_domains': 0   # 跳过的域名数量
+            'skipped_domains': 0,   # 跳过的域名数量
+            'v2ray_with_tags': 0   # v2ray 带标签的规则数量
         }
 
         retry_count = self.config["request_config"]["retry_count"]
@@ -1040,6 +1172,9 @@ class SearXNGHostnamesGenerator:
                 comment_samples = []
                 path_samples = []  # 路径规则样本
                 skip_samples = []  # 跳过的域名样本
+
+                # 重置 v2ray 标签计数器
+                initial_v2ray_tags = self.stats.get('v2ray_with_tags', 0)
 
                 # 解析域名
                 for line_num, line in enumerate(response.text.strip().split('\n'), 1):
@@ -1118,6 +1253,10 @@ class SearXNGHostnamesGenerator:
                         stats['invalid_domains'] += 1
                         continue
 
+                # 计算本次请求中的 v2ray 标签数量
+                current_v2ray_tags = self.stats.get('v2ray_with_tags', 0) - initial_v2ray_tags
+                stats['v2ray_with_tags'] = current_v2ray_tags
+
                 print(f"成功获取 {len(domains)} 个域名")
                 print(f"  - 总规则: {stats['total_rules']}")
                 print(f"  - 成功解析: {stats['parsed_domains']}")
@@ -1126,6 +1265,8 @@ class SearXNGHostnamesGenerator:
                 print(f"  - 忽略(无效域名): {stats['invalid_domains']}")
                 print(f"  - 重复域名: {stats['duplicate_domains']}")
                 print(f"  - 跳过域名: {stats['skipped_domains']}")
+                if format_type == "v2ray" and stats['v2ray_with_tags'] > 0:
+                    print(f"  - v2ray 带标签规则: {stats['v2ray_with_tags']}")
 
                 # 显示样本
                 if accepted_samples:
@@ -1167,6 +1308,27 @@ class SearXNGHostnamesGenerator:
     def clean_domain(self, domain: str) -> str:
         """
         清理域名字符串
+        根据配置决定是否保持原始结构
+
+        Args:
+            domain: 原始域名字符串
+
+        Returns:
+            清理后的域名
+        """
+        if not domain:
+            return None
+
+        # 如果配置为保持原始结构，使用专门的方法
+        if self.config["parsing"].get("preserve_original_structure", True):
+            return self.clean_domain_preserve_structure(domain)
+
+        # 原来的清理逻辑（可能移除 www. 前缀）
+        return self._clean_domain_legacy(domain)
+
+    def _clean_domain_legacy(self, domain: str) -> str:
+        """
+        传统的域名清理方法（可能移除 www. 前缀）
 
         Args:
             domain: 原始域名字符串
@@ -1189,9 +1351,10 @@ class SearXNGHostnamesGenerator:
         if '/' in domain:
             domain = domain.split('/')[0]
 
-        # 移除 www. 前缀
-        if domain.startswith('www.'):
-            domain = domain[4:]
+        # 移除 www. 前缀（传统行为）
+        if not self.config["parsing"].get("preserve_www_prefix", True):
+            if domain.startswith('www.'):
+                domain = domain[4:]
 
         # 移除空格和特殊字符
         domain = re.sub(r'[^\w.-]', '', domain)
@@ -1830,7 +1993,8 @@ class SearXNGHostnamesGenerator:
             'skipped_domains': 0,
             'auto_added': 0,
             'skipped_from_sources': 0,
-            'skip_overridden': 0
+            'skip_overridden': 0,
+            'v2ray_with_tags': 0
         }
 
         # 从在线源收集域名
@@ -1962,6 +2126,8 @@ class SearXNGHostnamesGenerator:
         print(f"📝 解析配置:")
         print(f"   - 忽略特定路径规则: {parsing_config.get('ignore_specific_paths', True)}")
         print(f"   - 严格域名级别检查: {parsing_config.get('strict_domain_level_check', True)}")
+        print(f"   - 保持原始结构: {parsing_config.get('preserve_original_structure', True)}")
+        print(f"   - 保持 www. 前缀: {parsing_config.get('preserve_www_prefix', True)}")
 
         # 显示自动分类配置
         auto_classify_config = self.config.get("auto_classify", {})
@@ -2200,9 +2366,10 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray 格式)")
+        print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray 格式 - 保持原始结构)")
         print("🔧 修复版本：skip 规则只影响数据源处理，不阻止明确的自动分类规则")
-        print("🆕 新增功能：支持 v2ray 格式 (domain:example.com, full:example.com)")
+        print("🆕 新增功能：支持 v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)")
+        print("🔧 修正功能：保持原始域名结构，不移除 www. 等前缀")
         print("=" * 90)
 
         try:
@@ -2273,6 +2440,8 @@ class SearXNGHostnamesGenerator:
         print(f"  - 🆕 主动添加域名: {self.stats.get('auto_added', 0):,}")
         print(f"  - 🔄 从数据源跳过: {self.stats.get('skipped_from_sources', 0):,}")
         print(f"  - 🔄 skip 规则被覆盖: {self.stats.get('skip_overridden', 0):,}")
+        if self.stats.get('v2ray_with_tags', 0) > 0:
+            print(f"  - 📝 v2ray 带标签规则: {self.stats.get('v2ray_with_tags', 0):,}")
 
         print(f"\n📁 输出目录: {self.config['output']['directory']}")
 
@@ -2288,6 +2457,8 @@ class SearXNGHostnamesGenerator:
         print(f"  - 严格域名级别检查: {self.config['parsing'].get('strict_domain_level_check', True)}")
         print(f"  - 忽略IP地址: {self.config['parsing']['ignore_ip']}")
         print(f"  - 忽略localhost: {self.config['parsing']['ignore_localhost']}")
+        print(f"  - 保持原始结构: {self.config['parsing'].get('preserve_original_structure', True)}")
+        print(f"  - 保持 www. 前缀: {self.config['parsing'].get('preserve_www_prefix', True)}")
 
         # 自动分类配置
         auto_classify_config = self.config.get("auto_classify", {})
@@ -2371,15 +2542,25 @@ class SearXNGHostnamesGenerator:
                     print(f"  - {rule_type}: {domain_count} 个域名 -> {rule_count} 条规则")
 
         print(f"\n🆕 v2ray 格式支持:")
-        print(f"  - domain:example.com  # 匹配域名及其所有子域名")
-        print(f"  - full:example.com    # 完全匹配指定域名")
-        print(f"  - 两种格式在处理时都会转换为标准域名，由 SearXNG 的正则自动处理子域名匹配")
+        print(f"  - domain:example.com         # 匹配域名及其所有子域名")
+        print(f"  - full:example.com           # 完全匹配指定域名")
+        print(f"  - domain:example.com:@tag    # 带标签的域名规则")
+        print(f"  - 标签信息会被记录但不影响域名匹配")
+        print(f"  - 只有明确的端口号(纯数字)才会被移除")
+        if self.stats.get('v2ray_with_tags', 0) > 0:
+            print(f"  - 本次处理了 {self.stats.get('v2ray_with_tags', 0)} 个带标签的 v2ray 规则")
+
+        print(f"\n🔧 原始结构保持:")
+        print(f"  - 保持 www.example.com 的 www. 前缀")
+        print(f"  - 保持子域名的完整结构")
+        print(f"  - 只移除明确的协议和端口信息")
+        print(f"  - v2ray 格式域名完全保持原始结构")
 
         print(f"\n📁 支持的文件格式:")
         print(f"  - domain: 纯域名格式 (每行一个域名)")
         print(f"  - regex: 正则表达式格式 (直接使用的正则)")
         print(f"  - ublock: uBlock Origin 格式")
-        print(f"  - v2ray: v2ray 格式 (domain:example.com, full:example.com)")
+        print(f"  - v2ray: v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)")
         print(f"  - replace: 替换格式 (old_domain=new_domain)")
         print(f"  - classify: 自动分类格式 (action:domain)")
 
@@ -2404,7 +2585,7 @@ class SearXNGHostnamesGenerator:
 
 def create_sample_config():
     """
-    创建示例配置文件 (支持 v2ray 格式)
+    创建示例配置文件 (支持 v2ray 格式，保持原始结构)
     """
     sample_config = {
         "sources": [
@@ -2520,7 +2701,9 @@ def create_sample_config():
             "ignore_specific_paths": True,
             "ignore_ip": True,
             "ignore_localhost": True,
-            "strict_domain_level_check": True
+            "strict_domain_level_check": True,
+            "preserve_www_prefix": True,  # 保持 www. 前缀
+            "preserve_original_structure": True  # 保持原始域名结构
         },
 
         "optimization": {
@@ -2579,9 +2762,11 @@ low_priority:*.google.com
 # 高优先级规则
 high_priority:wikipedia.org
 high_priority:*.wikipedia.org
+high_priority:www.wikipedia.org  # 会保持 www. 前缀
 
 # 替换规则 - 格式：replace:old_domain=new_domain
 replace:youtube.com=yt.example.com
+replace:www.youtube.com=yt.example.com  # www 前缀会被保留在匹配中
 replace:twitter.com=nitter.example.com
 
 # 跳过规则 - 只跳过数据源处理，不阻止明确的自动分类规则
@@ -2602,7 +2787,8 @@ low_priority:csdn.net
 
 example1.com  # 示例域名1
 example2.com  # 示例域名2
-*.example3.com  # 示例通配符域名
+www.example3.com  # www 前缀会被保持
+*.example4.com  # 示例通配符域名
 """)
 
     with open("custom_replace.txt", "w", encoding="utf-8") as f:
@@ -2610,6 +2796,7 @@ example2.com  # 示例域名2
 # 格式：old_domain=new_domain
 
 old.example.com=new.example.com
+www.old.example.com=new.example.com
 another.old.com=another.new.com
 """)
 
@@ -2617,23 +2804,32 @@ another.old.com=another.new.com
     with open("custom_v2ray.txt", "w", encoding="utf-8") as f:
         f.write("""# v2ray 格式规则示例文件
 # 支持的格式：
-# domain:example.com  - 匹配域名及其所有子域名
-# full:example.com    - 完全匹配指定域名
+# domain:example.com     - 匹配域名及其所有子域名
+# full:example.com       - 完全匹配指定域名
+# domain:example.com:@tag - 带标签的域名规则
 
 # 域名级别匹配（包括子域名）
 domain:scopus.com
 domain:researchgate.net
 domain:academia.edu
+domain:www.researchkit.cn  # www 前缀会被保持
 
 # 完全匹配
 full:scholar.google.ae
 full:scholar.google.com.hk
 full:pubmed.ncbi.nlm.nih.gov
+full:www.scholar.google.com  # www 前缀会被保持
 
 # 内容农场域名
 domain:csdn.net
 domain:jianshu.com
 domain:zhihu.com
+domain:www.cnblogs.com  # www 前缀会被保持
+
+# 带标签的规则示例
+domain:researchkit.cn:@cn  # 带地区标签
+full:www.example.com:@test:@demo  # 多个标签
+domain:academic.example.com:@academic:@high_priority  # 复合标签
 
 # 注释示例
 # domain:example.com  # 这是注释
@@ -2647,7 +2843,15 @@ domain:zhihu.com
     print("\n🆕 v2ray 格式说明:")
     print("  - domain:example.com         # 匹配域名及其所有子域名")
     print("  - full:example.com           # 完全匹配指定域名")
-    print("  - 两种格式都会转换为标准域名，SearXNG 的正则会自动处理子域名匹配")
+    print("  - domain:example.com:@tag    # 带标签的域名规则")
+    print("  - 标签信息会被显示但不影响域名处理")
+    print("  - 域名的原始结构(包括www前缀)完全保持")
+
+    print("\n🔧 原始结构保持说明:")
+    print("  - www.example.com 会保持 www. 前缀")
+    print("  - sub.example.com 会保持完整的子域名结构")
+    print("  - 只有明确的协议(http://)和端口号(:8080)才会被移除")
+    print("  - v2ray 格式中的标签(:@tag)会被识别但不影响域名本身")
 
     print("\n🔄 修复后的自动分类语法说明:")
     print("  - skip:domain.com            # 只从数据源跳过，不阻止其他规则")
@@ -2666,13 +2870,13 @@ domain:zhihu.com
     print("  - domain: 纯域名格式，每行一个域名")
     print("  - regex: 正则表达式格式，直接使用")
     print("  - ublock: uBlock Origin 格式")
-    print("  - v2ray: v2ray 格式 (domain:example.com, full:example.com)")
+    print("  - v2ray: v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)")
     print("  - replace: 替换格式，old_domain=new_domain")
     print("  - classify: 自动分类格式，action:domain")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray格式) - Skip 修复版")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray格式 - 保持原始结构) - Skip 修复版")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--create-config", action="store_true", help="创建示例配置文件和示例规则文件")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式")
