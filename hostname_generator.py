@@ -3,6 +3,7 @@
 SearXNG Hostnames 规则生成器 - 完善版
 - 支持低优先级/高优先级/替换规则从外部文件读取
 - 白名单功能改为自动分类语法功能，支持 remove:baidu.com 等语法
+- 修复：自动分类规则中的域名会被主动添加，而不仅仅是重新分类现有域名
 
 pip install requests pyyaml argparse
 """
@@ -39,7 +40,8 @@ class SearXNGHostnamesGenerator:
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
-            'auto_classified': 0  # 自动分类的数量
+            'auto_classified': 0,  # 自动分类的数量
+            'auto_added': 0  # 主动添加的域名数量
         }
         # 记录每个类别的域名数量
         self.category_domain_counts = {
@@ -570,6 +572,80 @@ class SearXNGHostnamesGenerator:
                     return rule['action'], f"自动分类规则: {rule['domain']}"
 
         return None, ""
+
+    def apply_auto_classify_rules_directly(self, categorized_domains: Dict[str, Set[str]]) -> None:
+        """
+        直接应用自动分类规则中的域名（新增功能）
+        不仅重新分类现有域名，还会主动添加规则中定义的域名
+
+        Args:
+            categorized_domains: 分类后的域名字典
+        """
+        if not self.auto_classify_rules:
+            return
+
+        print(f"\n🔄 正在应用自动分类规则中的域名...")
+
+        auto_added_count = 0
+        auto_added_samples = []
+
+        # 收集所有已存在的域名（用于跳过重复）
+        all_existing_domains = set()
+        for domain_set in categorized_domains.values():
+            all_existing_domains.update(d.lower() for d in domain_set)
+
+        for rule in self.auto_classify_rules:
+            if rule['action'] in ['remove', 'low_priority', 'high_priority']:
+                domain = rule['domain']
+
+                # 处理通配符域名
+                if domain.startswith('*.'):
+                    # 对于通配符规则，我们不直接添加，因为它们是匹配规则而不是具体域名
+                    continue
+
+                # 清理域名
+                cleaned_domain = self.clean_domain(domain)
+                if not cleaned_domain:
+                    continue
+
+                # 检查是否已存在
+                if cleaned_domain.lower() in all_existing_domains:
+                    continue
+
+                # 添加到相应类别
+                action = rule['action']
+                if action in categorized_domains:
+                    categorized_domains[action].add(cleaned_domain)
+                    all_existing_domains.add(cleaned_domain.lower())
+                    auto_added_count += 1
+
+                    if len(auto_added_samples) < 5:  # 显示前5个样本
+                        auto_added_samples.append(f"{cleaned_domain} -> {action}")
+
+            elif rule['action'] == 'replace':
+                # 处理替换规则 - 这里我们需要确保替换规则被添加到配置中
+                old_domain = rule['old_domain']
+                new_domain = rule['new_domain']
+
+                cleaned_old_domain = self.clean_domain(old_domain)
+                if cleaned_old_domain and new_domain:
+                    # 生成正则表达式格式的键
+                    old_regex = f"(.*\\.)?{re.escape(cleaned_old_domain)}$"
+                    self.config["replace_rules"][old_regex] = new_domain
+                    auto_added_count += 1
+
+                    if len(auto_added_samples) < 5:
+                        auto_added_samples.append(f"{cleaned_old_domain} -> {new_domain} (替换)")
+
+        if auto_added_count > 0:
+            print(f"  ✅ 主动添加了 {auto_added_count} 个域名到相应类别")
+            self.stats['auto_added'] = auto_added_count
+
+            print(f"  📝 添加的域名样本:")
+            for sample in auto_added_samples:
+                print(f"    + {sample}")
+        else:
+            print(f"  ℹ️  没有需要主动添加的域名")
 
     def is_domain_level_rule(self, url_string: str) -> bool:
         """
@@ -1592,7 +1668,8 @@ class SearXNGHostnamesGenerator:
             'duplicate_domains': 0,
             'ignored_comments': 0,
             'auto_classified': 0,
-            'skipped_domains': 0
+            'skipped_domains': 0,
+            'auto_added': 0
         }
 
         # 从在线源收集域名
@@ -1674,6 +1751,9 @@ class SearXNGHostnamesGenerator:
                     self.config["replace_rules"].update(replace_rules)
 
                 print(f"  ✅ 从文件加载了 {len(domains) + len(replace_rules)} 个规则到 {action} 类别")
+
+        # 🔥 新增功能：主动应用自动分类规则中的域名
+        self.apply_auto_classify_rules_directly(categorized_domains)
 
         return categorized_domains
 
@@ -1761,6 +1841,9 @@ class SearXNGHostnamesGenerator:
             rules["replace"] = all_replace_rules
             # 记录替换规则的域名数量
             self.category_domain_counts["replace"] = len(all_replace_rules)
+        else:
+            # 即使没有替换规则，也创建空规则以确保文件被创建
+            self.category_domain_counts["replace"] = 0
 
         # 移除规则 (列表格式) - 使用优化的合并
         print(f"\n生成移除规则...")
@@ -1780,6 +1863,9 @@ class SearXNGHostnamesGenerator:
 
         if remove_rules:
             rules["remove"] = remove_rules
+        else:
+            # 创建空移除规则列表，确保文件被创建
+            rules["remove"] = []
 
         # 低优先级规则 (列表格式) - 使用优化的合并
         print(f"\n生成低优先级规则...")
@@ -1799,6 +1885,9 @@ class SearXNGHostnamesGenerator:
 
         if low_priority_rules:
             rules["low_priority"] = low_priority_rules
+        else:
+            # 创建空低优先级规则列表，确保文件被创建
+            rules["low_priority"] = []
 
         # 高优先级规则 (列表格式) - 使用优化的合并
         print(f"\n生成高优先级规则...")
@@ -1818,6 +1907,9 @@ class SearXNGHostnamesGenerator:
 
         if high_priority_rules:
             rules["high_priority"] = high_priority_rules
+        else:
+            # 创建空高优先级规则列表，确保文件被创建
+            rules["high_priority"] = []
 
         # 对所有规则进行排序和去重
         for rule_type in rules:
@@ -1846,11 +1938,16 @@ class SearXNGHostnamesGenerator:
         # 生成主配置文件 (用于引用外部文件)
         main_config = {"hostnames": {}}
 
-        # 保存各类规则到单独文件
-        for rule_type, rule_data in rules.items():
-            if rule_type in files_config and rule_data:
+        # 保存各类规则到单独文件 - 确保所有类别的文件都被创建
+        expected_rule_types = ["replace", "remove", "low_priority", "high_priority"]
+
+        for rule_type in expected_rule_types:
+            if rule_type in files_config:
                 filename = files_config[rule_type]
                 filepath = os.path.join(output_dir, filename)
+
+                # 获取规则数据，如果不存在则创建空数据
+                rule_data = rules.get(rule_type, [] if rule_type != "replace" else {})
 
                 try:
                     with open(filepath, 'w', encoding='utf-8') as f:
@@ -1879,6 +1976,7 @@ class SearXNGHostnamesGenerator:
                         # 添加自动分类信息
                         if self.config.get("auto_classify", {}).get("enabled", False):
                             f.write(f"# Auto-classification enabled - {self.stats.get('auto_classified', 0)} domains auto-classified\n")
+                            f.write(f"# Auto-added domains - {self.stats.get('auto_added', 0)} domains directly added from rules\n")
 
                         # 添加自定义文件信息
                         if self.config.get("custom_rules", {}).get("enabled", False):
@@ -1887,9 +1985,16 @@ class SearXNGHostnamesGenerator:
                         f.write(f"\n")
 
                         # 直接写入规则内容，不包含顶级键
-                        yaml.dump(rule_data, f, default_flow_style=False, allow_unicode=True, indent=2)
+                        if rule_data or rule_type in rules:  # 只有当有数据或原本就在rules中才写入内容
+                            yaml.dump(rule_data, f, default_flow_style=False, allow_unicode=True, indent=2)
+                        else:
+                            # 写入空内容标记
+                            if rule_type == "replace":
+                                f.write("{}\n")  # 空字典
+                            else:
+                                f.write("[]\n")  # 空列表
 
-                    print(f"已保存 {rule_type} 规则到: {filepath}")
+                    print(f"已保存 {rule_type} 规则到: {filepath} ({rule_count} 条规则)")
 
                     # 在主配置中引用外部文件
                     main_config["hostnames"][rule_type] = filename
@@ -1913,10 +2018,13 @@ class SearXNGHostnamesGenerator:
                         f.write("# Multi-rule performance optimized with advanced pattern matching\n")
 
                     f.write("# Fixed: TLD optimization preserves complete domain structure\n")
+                    f.write("# Fixed: Auto-classification rules now actively add domains\n")
 
                     # 添加功能信息
                     if self.config.get("auto_classify", {}).get("enabled", False):
                         f.write("# Auto-classification enabled for intelligent rule sorting\n")
+                        f.write(f"# Auto-classified domains: {self.stats.get('auto_classified', 0)}\n")
+                        f.write(f"# Auto-added domains: {self.stats.get('auto_added', 0)}\n")
 
                     if self.config.get("custom_rules", {}).get("enabled", False):
                         f.write("# Custom rule files enabled for external rule management\n")
@@ -1936,6 +2044,15 @@ class SearXNGHostnamesGenerator:
         """
         output_dir = self.config["output"]["directory"]
         os.makedirs(output_dir, exist_ok=True)
+
+        # 确保所有类别都在规则中
+        expected_rule_types = ["replace", "remove", "low_priority", "high_priority"]
+        for rule_type in expected_rule_types:
+            if rule_type not in rules:
+                if rule_type == "replace":
+                    rules[rule_type] = {}
+                else:
+                    rules[rule_type] = []
 
         # 构建完整的 hostnames 配置
         hostnames_config = {"hostnames": rules}
@@ -1964,10 +2081,12 @@ class SearXNGHostnamesGenerator:
 
                 f.write("# Features: Auto-classification, custom rule files, TLD optimization\n")
                 f.write("# Rules targeting specific paths are ignored to prevent over-blocking\n")
+                f.write("# Fixed: Auto-classification rules now actively add domains\n")
 
                 # 添加功能信息
                 if self.config.get("auto_classify", {}).get("enabled", False):
                     f.write(f"# Auto-classification enabled - {self.stats.get('auto_classified', 0)} domains auto-classified\n")
+                    f.write(f"# Auto-added domains - {self.stats.get('auto_added', 0)} domains directly added from rules\n")
 
                 if self.config.get("custom_rules", {}).get("enabled", False):
                     f.write(f"# Custom rule files enabled - supports external rule management\n")
@@ -1985,6 +2104,7 @@ class SearXNGHostnamesGenerator:
         运行生成器
         """
         print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化)")
+        print("🔧 修复版本：自动分类规则现在会主动添加域名")
         print("=" * 90)
 
         try:
@@ -2052,6 +2172,7 @@ class SearXNGHostnamesGenerator:
         print(f"  - 忽略(无效域名): {self.stats['invalid_domains']:,}")
         print(f"  - 重复域名: {self.stats['duplicate_domains']:,}")
         print(f"  - 自动分类处理: {self.stats.get('auto_classified', 0):,}")
+        print(f"  - 🆕 主动添加域名: {self.stats.get('auto_added', 0):,}")
         print(f"  - 跳过域名: {self.stats.get('skipped_domains', 0):,}")
 
         print(f"\n📁 输出目录: {self.config['output']['directory']}")
@@ -2077,7 +2198,8 @@ class SearXNGHostnamesGenerator:
             print(f"  - 内置规则: {len(auto_classify_config.get('rules', []))} 个")
             print(f"  - 外部源: {len([s for s in auto_classify_config.get('sources', []) if s.get('enabled', True)])} 个")
             print(f"  - 总计规则: {len(self.auto_classify_rules)} 个")
-            print(f"  - 处理域名: {self.stats.get('auto_classified', 0):,} 个")
+            print(f"  - 重新分类域名: {self.stats.get('auto_classified', 0):,} 个")
+            print(f"  - 🆕 主动添加域名: {self.stats.get('auto_added', 0):,} 个")
             print(f"  - 跳过域名: {self.stats.get('skipped_domains', 0):,} 个")
         else:
             print(f"  - 状态: 已禁用")
@@ -2116,7 +2238,7 @@ class SearXNGHostnamesGenerator:
             print("在 SearXNG settings.yml 中添加:")
             print("hostnames:")
             for rule_type, filename in self.config["output"]["files"].items():
-                if rule_type != "main_config" and rule_type in rules:
+                if rule_type != "main_config" and rule_type in ["replace", "remove", "low_priority", "high_priority"]:
                     print(f"  {rule_type}: '{filename}'")
         else:
             print("将生成的 hostnames.yml 内容复制到 SearXNG settings.yml 中")
@@ -2134,22 +2256,24 @@ class SearXNGHostnamesGenerator:
 
         # 显示各类别的压缩情况
         print(f"\n📈 各类别压缩详情:")
-        for rule_type, rule_data in rules.items():
-            if isinstance(rule_data, (list, dict)):
-                rule_count = len(rule_data)
+        for rule_type in ["replace", "remove", "low_priority", "high_priority"]:
+            if rule_type in rules:
+                rule_data = rules[rule_type]
+                rule_count = len(rule_data) if isinstance(rule_data, (list, dict)) else 0
                 domain_count = self.category_domain_counts.get(rule_type, 0)
                 if domain_count > 0 and rule_count > 0:
                     category_ratio = (rule_count / domain_count) * 100
                     print(f"  - {rule_type}: {category_ratio:.1f}% ({domain_count} 个域名 -> {rule_count} 条规则)")
+                elif domain_count == 0 and rule_count == 0:
+                    print(f"  - {rule_type}: 空 (0 个域名 -> 0 条规则)")
+                else:
+                    print(f"  - {rule_type}: {domain_count} 个域名 -> {rule_count} 条规则")
 
-        print(f"\n🆕 新增功能:")
-        print(f"  - ✅ 自动分类：支持 remove:baidu.com、low_priority:google.com 等语法")
-        print(f"  - ✅ 自定义文件：支持从外部文件加载各类规则")
-        print(f"  - ✅ 跳过规则：使用 skip:domain.com 跳过特定域名处理")
-        print(f"  - ✅ 替换规则：支持 replace:old.com=new.com 语法")
-        print(f"  - ✅ 多格式支持：支持 domain、regex、ublock、replace 等格式")
-        print(f"  - ✅ 通配符支持：支持 *.baidu.com 语法匹配子域名")
-        print(f"  - ✅ 实时统计：显示处理过程中的各种统计信息")
+        print(f"\n🆕 主要修复:")
+        print(f"  - ✅ 自动分类规则现在会主动添加域名到相应类别")
+        print(f"  - ✅ 即使没有从数据源获取的域名，也会处理自动分类规则中的域名")
+        print(f"  - ✅ 确保所有类别的规则文件都会被创建（即使为空）")
+        print(f"  - ✅ 修复了高优先级、低优先级规则不生成的问题")
 
         print(f"\n🔧 自动分类语法示例:")
         print(f"  - remove:baidu.com          # 将 baidu.com 添加到移除列表")
@@ -2165,11 +2289,11 @@ class SearXNGHostnamesGenerator:
         print(f"  - ublock: uBlock Origin 格式")
         print(f"  - replace: 替换格式 (old_domain=new_domain)")
 
-        print(f"\n🔧 修复说明:")
-        print(f"  - 保留了原有的 TLD 优化和性能优化功能")
-        print(f"  - 新增了灵活的自动分类系统，替代了原白名单功能")
-        print(f"  - 支持从多种格式的外部文件加载自定义规则")
-        print(f"  - 改进了统计信息显示，更详细地展示处理过程")
+        if self.stats.get('auto_added', 0) > 0:
+            print(f"\n🎯 自动添加详情:")
+            print(f"  - 主动添加的域名主要来自自动分类规则")
+            print(f"  - 这些域名即使不在数据源中也会被处理")
+            print(f"  - 这解决了之前高优先级/低优先级规则不生成的问题")
 
 
 def create_sample_config():
@@ -2383,9 +2507,14 @@ another.old.com=another.new.com
     print("  - replace: 替换格式，old_domain=new_domain")
     print("  - classify: 自动分类格式，action:domain")
 
+    print("\n🆕 修复说明:")
+    print("  - 自动分类规则现在会主动添加域名")
+    print("  - 即使域名不在数据源中，也会被处理")
+    print("  - 解决了高优先级/低优先级规则不生成的问题")
+
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化)")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化) - 修复版")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--create-config", action="store_true", help="创建示例配置文件和示例规则文件")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式")
