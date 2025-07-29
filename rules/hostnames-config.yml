@@ -4,7 +4,13 @@
 # Features: Auto-classification, custom rule files, TLD optimization
 # Multi-rule performance optimized with advanced pattern matching
 # Fixed: TLD optimization preserves complete domain structure
+# Fixed: Auto-classification rules now actively add domains
 # Auto-classification enabled for intelligent rule sorting
+# Auto-classified domains: 0
+# Auto-added domains: 4
 
 hostnames:
+  high_priority: high-priority-hosts.yml
+  low_priority: low-priority-hosts.yml
   remove: remove-hosts.yml
+  replace: rewrite-hosts.yml
