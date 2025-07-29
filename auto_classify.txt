@@ -36,6 +36,7 @@ high_priority:docs.python.org
 high_priority:nodejs.org
 high_priority:reactjs.org
 high_priority:vuejs.org
+high_priority:docker.com
 
 # 百科/学术类
 high_priority:wikipedia.org
