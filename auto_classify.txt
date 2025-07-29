@@ -29,6 +29,7 @@ high_priority:github.com
 high_priority:stackoverflow.com
 high_priority:v2ex.com
 high_priority:cnblogs.com
+high_priority:reddit.com
 
 # 编程语言类
 high_priority:developer.mozilla.org
