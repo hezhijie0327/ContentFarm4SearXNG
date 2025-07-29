@@ -1,8 +1,8 @@
 # @content-farm-terminator/extra-content-farms 过度匹配
-baidu.com
+skip:baidu.com
 
 # @content-farm-terminator/extra-content-farms @cobaltdisco/Google-Chinese-Results-Blocklist @Paxxs/Google-Blocklist 过度匹配
-csdn.net
+skip:csdn.net
 
 # @content-farm-terminator/extra-content-farms 过度匹配
-dingtalk.com
+skip:dingtalk.com
