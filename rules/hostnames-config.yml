@@ -5,9 +5,11 @@
 # Multi-rule performance optimized with advanced pattern matching
 # Fixed: TLD optimization preserves complete domain structure
 # Fixed: Auto-classification rules now actively add domains
+# Fixed: skip rules only affect source processing, not explicit auto-classification
 # Auto-classification enabled for intelligent rule sorting
 # Auto-classified domains: 0
-# Auto-added domains: 4
+# Auto-added domains: 5
+# Skip overrides: 1
 
 hostnames:
   high_priority: high-priority-hosts.yml

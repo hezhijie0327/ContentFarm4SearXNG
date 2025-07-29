@@ -6,7 +6,9 @@
 # Multi-rule performance optimized with advanced pattern matching
 # Features: Auto-classification, custom rule files, TLD optimization
 # Rules targeting specific paths are ignored to prevent over-blocking
+# Fixed: skip rules only affect source processing, not explicit auto-classification
 # Auto-classification enabled - 0 domains auto-classified
-# Auto-added domains - 4 domains directly added from rules
+# Auto-added domains - 5 domains directly added from rules
+# Skip overrides - 1 domains had skip rules overridden
 
 - (.*\.)?(cnblogs|github|stackoverflow|v2ex)\.com$
