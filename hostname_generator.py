@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-SearXNG Hostnames 规则生成器 - 修复TLD优化问题 + 精确白名单功能
-修复了域名TLD优化中丢失顶级域名的问题，并添加了精确白名单过滤功能
+SearXNG Hostnames 规则生成器 - 完善版
+- 支持低优先级/高优先级/替换规则从外部文件读取
+- 白名单功能改为自动分类语法功能，支持 remove:baidu.com 等语法
 
 pip install requests pyyaml argparse
 """
@@ -30,8 +31,7 @@ class SearXNGHostnamesGenerator:
         self.config = self.load_config(config_file)
         self.force_single_regex = force_single_regex
         self.domains = set()
-        self.whitelist_patterns = []  # 编译后的白名单正则模式
-        self.whitelist_domains = set()  # 精确匹配的白名单域名
+        self.auto_classify_rules = []  # 自动分类规则
         self.stats = {
             'total_rules': 0,
             'parsed_domains': 0,
@@ -39,9 +39,9 @@ class SearXNGHostnamesGenerator:
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
-            'whitelist_filtered': 0  # 新增：被白名单过滤的域名数量
+            'auto_classified': 0  # 自动分类的数量
         }
-        # 新增：记录每个类别的域名数量
+        # 记录每个类别的域名数量
         self.category_domain_counts = {
             'remove': 0,
             'low_priority': 0,
@@ -49,8 +49,8 @@ class SearXNGHostnamesGenerator:
             'replace': 0
         }
 
-        # 加载白名单
-        self.load_whitelist()
+        # 加载自动分类规则
+        self.load_auto_classify_rules()
 
     def load_config(self, config_file: str) -> Dict:
         """
@@ -78,13 +78,6 @@ class SearXNGHostnamesGenerator:
                     "action": "remove",
                     "format": "ublock",
                     "enabled": True
-                },
-                {
-                    "name": "Content Farm Terminator - Extra Content Farm Filters",
-                    "url": "https://danny0838.github.io/content-farm-terminator/files/blocklist/extra-content-farms.txt",
-                    "action": "remove",
-                    "format": "ublock",
-                    "enabled": False
                 },
                 {
                     "name": "Content Farm Terminator - Bad Cloners",
@@ -115,48 +108,36 @@ class SearXNGHostnamesGenerator:
                     "enabled": True
                 },
             ],
-            # 白名单配置
-            "whitelist": {
+
+            # 自定义规则配置（从文件读取）
+            "custom_rules": {
+                "enabled": False,
+                "sources": []
+            },
+
+            # 自动分类语法配置（替换原白名单功能）
+            "auto_classify": {
                 "enabled": True,
-                "mode": "remove_from_all",  # remove_from_all, remove_from_sources, custom_action
                 "sources": [
                     {
-                        "name": "Local Whitelist",
-                        "file": "./whitelist.txt",
-                        "format": "domain",
+                        "name": "Auto Classify Rules",
+                        "file": "./auto_classify.txt",
+                        "format": "classify",  # 支持 action:domain 语法
                         "enabled": True
-                    }
+                    },
                 ],
-                # 直接在配置中定义的白名单
-                "domains": [
-                    # 精确域名匹配 - 只匹配完全相同的域名
-                    #"baidu.com",        # 只匹配 baidu.com，不匹配 test.baidu.com
-                    #"google.com",       # 只匹配 google.com，不匹配 sub.google.com
-                    #"bing.com"          # 只匹配 bing.com，不匹配 cn.bing.com
-                ],
-                "patterns": [
-                    # 正则表达式模式匹配
-                    #r".*\.gov\..*",      # 政府网站
-                    #r".*\.edu\..*",      # 教育网站
-                    #r".*wikipedia\..*"   # 维基百科
-                ],
-                "wildcard_domains": [
-                    # 通配符域名匹配（会转换为正则）- 用于匹配子域名
-                    #"*.github.com",      # 匹配所有GitHub子域名
-                    #"*.stackoverflow.com", # 匹配所有Stack Overflow子域名
-                    #"*.baidu.com"        # 如果要匹配所有百度子域名，使用这种方式
-                ],
-                # 按源名称配置特定白名单
-                "source_specific": {
-                    # 只对特定数据源应用的白名单
-                    #"Chinese Internet is Dead": {
-                    #    "domains": ["example.com"],     # 精确匹配
-                    #    "patterns": [r".*\.example\..*"], # 正则匹配
-                    #    "wildcard_domains": ["*.example.com"] # 通配符匹配
-                    #}
-                }
+                # 直接在配置中定义的自动分类规则
+                "rules": [
+                    # 语法示例：
+                    # "remove:example.com",           # 将 example.com 添加到移除列表
+                    # "low_priority:google.com",      # 将 google.com 添加到低优先级列表
+                    # "high_priority:wikipedia.org",  # 将 wikipedia.org 添加到高优先级列表
+                    # "replace:youtube.com=yt.example.com",  # 替换规则
+                    # "skip:baidu.com",               # 跳过处理此域名（从所有源中移除）
+                ]
             },
-            # 域名替换规则
+
+            # 域名替换规则（保留原配置方式）
             "replace_rules": {
                 #'(.*\.)?youtube\.com$': 'yt.example.com',
                 #'(.*\.)?youtu\.be$': 'yt.example.com',
@@ -164,18 +145,22 @@ class SearXNGHostnamesGenerator:
                 #'(.*\.)?redd\.it$': 'teddit.example.com',
                 #'(www\.)?twitter\.com$': 'nitter.example.com'
             },
+
             # 固定的移除规则
             "fixed_remove": [
                 #'(.*\.)?facebook.com$'
             ],
+
             # 固定的低优先级规则
             "fixed_low_priority": [
                 #'(.*\.)?google(\..*)?$'
             ],
+
             # 固定的高优先级规则
             "fixed_high_priority": [
                 #'(.*\.)?wikipedia.org$'
             ],
+
             # 解析配置
             "parsing": {
                 "ignore_specific_paths": True,  # 忽略指向特定路径的规则
@@ -183,6 +168,7 @@ class SearXNGHostnamesGenerator:
                 "ignore_localhost": True,  # 忽略本地主机
                 "strict_domain_level_check": True  # 严格检查域名级别规则
             },
+
             # 性能优化配置
             "optimization": {
                 "merge_domains": True,          # 启用域名合并优化
@@ -199,12 +185,14 @@ class SearXNGHostnamesGenerator:
                 "sort_before_merge": True,          # 合并前排序域名
                 "enable_advanced_tld_merge": True   # 启用高级TLD合并
             },
+
             # 请求配置
             "request_config": {
                 "timeout": 30,
                 "retry_count": 3,
                 "retry_delay": 1
             },
+
             # 输出配置
             "output": {
                 "mode": "separate_files",  # separate_files 或 single_file
@@ -243,59 +231,29 @@ class SearXNGHostnamesGenerator:
             else:
                 base_dict[key] = value
 
-    def load_whitelist(self) -> None:
+    def load_auto_classify_rules(self) -> None:
         """
-        加载白名单配置
+        加载自动分类规则配置
         """
-        if not self.config.get("whitelist", {}).get("enabled", False):
-            print("🚫 白名单功能已禁用")
+        if not self.config.get("auto_classify", {}).get("enabled", False):
+            print("🔄 自动分类功能已禁用")
             return
 
-        print("📝 正在加载白名单配置...")
-        whitelist_config = self.config["whitelist"]
+        print("🔄 正在加载自动分类规则...")
+        auto_classify_config = self.config["auto_classify"]
 
-        # 加载直接配置的域名（精确匹配）
-        domains = whitelist_config.get("domains", [])
-        self.whitelist_domains.update(d.lower() for d in domains if d)
-        if domains:
-            print(f"  ✅ 加载了 {len(domains)} 个精确匹配域名")
-            for domain in domains[:5]:  # 显示前5个样本
-                print(f"    - {domain} (精确匹配)")
-            if len(domains) > 5:
-                print(f"    ... 还有 {len(domains)-5} 个域名")
+        # 加载直接配置的规则
+        rules = auto_classify_config.get("rules", [])
+        for rule in rules:
+            parsed_rule = self._parse_auto_classify_rule(rule)
+            if parsed_rule:
+                self.auto_classify_rules.append(parsed_rule)
 
-        # 加载正则表达式模式
-        patterns = whitelist_config.get("patterns", [])
-        for pattern in patterns:
-            try:
-                compiled_pattern = re.compile(pattern, re.IGNORECASE)
-                self.whitelist_patterns.append(compiled_pattern)
-            except re.error as e:
-                print(f"  ❌ 无效的正则表达式模式 '{pattern}': {e}")
-        if patterns:
-            print(f"  ✅ 加载了 {len(patterns)} 个正则表达式模式")
-            for pattern in patterns[:3]:  # 显示前3个样本
-                print(f"    - {pattern}")
+        if rules:
+            print(f"  ✅ 加载了 {len(rules)} 个内置自动分类规则")
 
-        # 加载通配符域名（转换为正则）
-        wildcard_domains = whitelist_config.get("wildcard_domains", [])
-        converted_wildcards = 0
-        for wildcard in wildcard_domains:
-            try:
-                # 转换通配符为正则表达式
-                regex_pattern = self._wildcard_to_regex(wildcard)
-                compiled_pattern = re.compile(regex_pattern, re.IGNORECASE)
-                self.whitelist_patterns.append(compiled_pattern)
-                converted_wildcards += 1
-            except re.error as e:
-                print(f"  ❌ 无效的通配符域名 '{wildcard}': {e}")
-        if wildcard_domains:
-            print(f"  ✅ 加载了 {len(wildcard_domains)} 个通配符域名，成功转换 {converted_wildcards} 个")
-            for wildcard in wildcard_domains[:3]:  # 显示前3个样本
-                print(f"    - {wildcard} -> 匹配子域名")
-
-        # 从远程源和本地文件加载白名单
-        sources = whitelist_config.get("sources", [])
+        # 从外部源加载规则
+        sources = auto_classify_config.get("sources", [])
         for source in sources:
             if not source.get("enabled", True):
                 continue
@@ -303,48 +261,86 @@ class SearXNGHostnamesGenerator:
             try:
                 if "url" in source:
                     # 从URL加载
-                    print(f"  🌐 正在从URL加载白名单: {source['name']}")
-                    domains_from_url = self._load_whitelist_from_url(source)
-                    self._add_domains_to_whitelist(domains_from_url, source.get("format", "domain"))
+                    print(f"  🌐 正在从URL加载自动分类规则: {source['name']}")
+                    rules_from_url = self._load_auto_classify_from_url(source)
+                    self.auto_classify_rules.extend(rules_from_url)
                 elif "file" in source:
                     # 从本地文件加载
-                    print(f"  📁 正在从文件加载白名单: {source['name']}")
-                    domains_from_file = self._load_whitelist_from_file(source)
-                    self._add_domains_to_whitelist(domains_from_file, source.get("format", "domain"))
+                    print(f"  📁 正在从文件加载自动分类规则: {source['name']}")
+                    rules_from_file = self._load_auto_classify_from_file(source)
+                    self.auto_classify_rules.extend(rules_from_file)
             except Exception as e:
-                print(f"  ❌ 加载白名单源 '{source['name']}' 失败: {e}")
+                print(f"  ❌ 加载自动分类源 '{source['name']}' 失败: {e}")
 
-        total_domains = len(self.whitelist_domains)
-        total_patterns = len(self.whitelist_patterns)
-        print(f"📋 白名单加载完成: {total_domains} 个精确域名, {total_patterns} 个模式（含通配符）")
-        print(f"⚠️  注意: 精确匹配只匹配完全相同的域名，子域名需要使用通配符或正则表达式")
+        total_rules = len(self.auto_classify_rules)
+        print(f"🔄 自动分类规则加载完成: {total_rules} 个规则")
 
-    def _wildcard_to_regex(self, wildcard: str) -> str:
+        # 显示规则统计
+        if total_rules > 0:
+            stats = defaultdict(int)
+            for rule in self.auto_classify_rules:
+                stats[rule['action']] += 1
+
+            print(f"  📊 规则分布:")
+            for action, count in stats.items():
+                print(f"    - {action}: {count} 个")
+
+    def _parse_auto_classify_rule(self, rule_str: str) -> Dict:
         """
-        将通配符域名转换为正则表达式
+        解析自动分类规则
 
         Args:
-            wildcard: 通配符域名 (如 *.example.com)
+            rule_str: 规则字符串，格式如 "action:domain" 或 "replace:old=new"
 
         Returns:
-            正则表达式字符串
+            解析后的规则字典
         """
-        # 转义除了*之外的特殊字符
-        escaped = re.escape(wildcard)
-        # 将转义后的*替换为.*
-        regex = escaped.replace(r'\*', '.*')
-        # 添加开始和结束锚点
-        return f"^{regex}$"
+        rule_str = rule_str.strip()
+        if not rule_str or rule_str.startswith('#'):
+            return None
 
-    def _load_whitelist_from_url(self, source: dict) -> List[str]:
+        if ':' not in rule_str:
+            return None
+
+        action, content = rule_str.split(':', 1)
+        action = action.strip().lower()
+        content = content.strip()
+
+        if not content:
+            return None
+
+        # 处理替换规则
+        if action == 'replace':
+            if '=' in content:
+                old_domain, new_domain = content.split('=', 1)
+                return {
+                    'action': 'replace',
+                    'old_domain': old_domain.strip(),
+                    'new_domain': new_domain.strip()
+                }
+            else:
+                print(f"  ❌ 无效的替换规则格式: {rule_str} (应为 replace:old=new)")
+                return None
+
+        # 处理其他动作
+        elif action in ['remove', 'low_priority', 'high_priority', 'skip']:
+            return {
+                'action': action,
+                'domain': content
+            }
+        else:
+            print(f"  ❌ 未知的动作类型: {action}")
+            return None
+
+    def _load_auto_classify_from_url(self, source: dict) -> List[Dict]:
         """
-        从URL加载白名单
+        从URL加载自动分类规则
 
         Args:
-            source: 白名单源配置
+            source: 规则源配置
 
         Returns:
-            域名列表
+            规则列表
         """
         url = source["url"]
         timeout = self.config["request_config"]["timeout"]
@@ -359,7 +355,7 @@ class SearXNGHostnamesGenerator:
                 response = requests.get(url, timeout=timeout, headers=headers)
                 response.raise_for_status()
 
-                return self._parse_whitelist_content(response.text, source.get("format", "domain"))
+                return self._parse_auto_classify_content(response.text)
 
             except requests.RequestException as e:
                 print(f"    ❌ 获取失败 (尝试 {attempt + 1}/{retry_count}): {e}")
@@ -368,21 +364,21 @@ class SearXNGHostnamesGenerator:
 
         return []
 
-    def _load_whitelist_from_file(self, source: dict) -> List[str]:
+    def _load_auto_classify_from_file(self, source: dict) -> List[Dict]:
         """
-        从本地文件加载白名单
+        从本地文件加载自动分类规则
 
         Args:
-            source: 白名单源配置
+            source: 规则源配置
 
         Returns:
-            域名列表
+            规则列表
         """
         file_path = source["file"]
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            return self._parse_whitelist_content(content, source.get("format", "domain"))
+            return self._parse_auto_classify_content(content)
         except FileNotFoundError:
             print(f"    ❌ 文件不存在: {file_path}")
         except Exception as e:
@@ -390,122 +386,190 @@ class SearXNGHostnamesGenerator:
 
         return []
 
-    def _parse_whitelist_content(self, content: str, format_type: str) -> List[str]:
+    def _parse_auto_classify_content(self, content: str) -> List[Dict]:
         """
-        解析白名单内容
+        解析自动分类规则内容
 
         Args:
             content: 文件内容
-            format_type: 格式类型 (domain, ublock, regex)
 
         Returns:
-            域名列表
+            规则列表
         """
-        domains = []
-
+        rules = []
         for line in content.strip().split('\n'):
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
 
-            if format_type == "domain":
-                # 纯域名格式
-                cleaned_domain = self.clean_domain(line)
-                if cleaned_domain:
-                    domains.append(cleaned_domain)
-            elif format_type == "ublock":
-                # uBlock格式
-                domain, _ = self.parse_ublock_rule(line)
-                if domain:
-                    domains.append(domain)
-            elif format_type == "regex":
-                # 正则表达式格式，直接作为模式处理
-                try:
-                    compiled_pattern = re.compile(line, re.IGNORECASE)
-                    self.whitelist_patterns.append(compiled_pattern)
-                except re.error as e:
-                    print(f"    ❌ 无效的正则表达式: {line} - {e}")
+            parsed_rule = self._parse_auto_classify_rule(line)
+            if parsed_rule:
+                rules.append(parsed_rule)
 
-        return domains
+        return rules
 
-    def _add_domains_to_whitelist(self, domains: List[str], format_type: str) -> None:
+    def load_custom_rules_from_file(self, file_path: str, format_type: str, action: str) -> Tuple[Set[str], Dict[str, str], Dict]:
         """
-        将域名添加到白名单
+        从文件加载自定义规则
 
         Args:
-            domains: 域名列表
-            format_type: 格式类型
+            file_path: 文件路径
+            format_type: 格式类型 (domain, regex, ublock, replace)
+            action: 动作类型 (remove, low_priority, high_priority, replace)
+
+        Returns:
+            (域名集合, 替换规则字典, 统计信息)
         """
-        if format_type == "regex":
-            # 正则表达式已经在解析时处理了
-            return
+        domains = set()
+        replace_rules = {}
+        stats = {
+            'total_rules': 0,
+            'parsed_domains': 0,
+            'invalid_domains': 0,
+            'ignored_comments': 0
+        }
 
-        added_count = 0
-        for domain in domains:
-            if domain and domain not in self.whitelist_domains:
-                self.whitelist_domains.add(domain.lower())
-                added_count += 1
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
 
-        if added_count > 0:
-            print(f"    ✅ 添加了 {added_count} 个域名到白名单")
+            print(f"  📁 正在解析文件: {file_path}")
 
-    def is_whitelisted(self, domain: str, source_name: str = None) -> Tuple[bool, str]:
+            for line_num, line in enumerate(content.strip().split('\n'), 1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                stats['total_rules'] += 1
+
+                # 跳过注释
+                if line.startswith('#'):
+                    stats['ignored_comments'] += 1
+                    continue
+
+                try:
+                    if format_type == "replace":
+                        # 替换规则格式：old_domain=new_domain 或 old_regex=new_domain
+                        if '=' in line:
+                            old_pattern, new_domain = line.split('=', 1)
+                            old_pattern = old_pattern.strip()
+                            new_domain = new_domain.strip()
+
+                            if old_pattern and new_domain:
+                                replace_rules[old_pattern] = new_domain
+                                stats['parsed_domains'] += 1
+                            else:
+                                stats['invalid_domains'] += 1
+                        else:
+                            stats['invalid_domains'] += 1
+
+                    elif format_type == "regex":
+                        # 正则表达式格式，直接使用
+                        if line:
+                            domains.add(line)
+                            stats['parsed_domains'] += 1
+
+                    elif format_type == "ublock":
+                        # uBlock 格式
+                        domain, ignore_reason = self.parse_ublock_rule(line)
+                        if domain:
+                            domains.add(domain)
+                            stats['parsed_domains'] += 1
+                        else:
+                            stats['invalid_domains'] += 1
+
+                    else:  # domain 格式
+                        # 处理行末注释
+                        if '#' in line:
+                            line = line[:line.find('#')].strip()
+                            if not line:
+                                stats['ignored_comments'] += 1
+                                continue
+
+                        domain = self.clean_domain(line)
+                        if domain:
+                            domains.add(domain)
+                            stats['parsed_domains'] += 1
+                        else:
+                            stats['invalid_domains'] += 1
+
+                except Exception as e:
+                    print(f"    ❌ 解析第 {line_num} 行时出错: {line[:50]}... - {e}")
+                    stats['invalid_domains'] += 1
+
+            print(f"    ✅ 解析完成: {stats['parsed_domains']} 个有效规则")
+            if stats['invalid_domains'] > 0:
+                print(f"    ⚠️  忽略了 {stats['invalid_domains']} 个无效规则")
+
+        except FileNotFoundError:
+            print(f"    ❌ 文件不存在: {file_path}")
+        except Exception as e:
+            print(f"    ❌ 读取文件失败: {e}")
+
+        return domains, replace_rules, stats
+
+    def should_skip_domain(self, domain: str, source_name: str = None) -> Tuple[bool, str]:
         """
-        检查域名是否在白名单中（精确匹配模式）
+        检查域名是否应该被跳过处理
 
         Args:
             domain: 要检查的域名
-            source_name: 数据源名称（用于源特定白名单）
+            source_name: 数据源名称
 
         Returns:
-            (是否在白名单中, 匹配原因)
+            (是否跳过, 跳过原因)
         """
-        if not self.config.get("whitelist", {}).get("enabled", False):
+        if not self.auto_classify_rules:
             return False, ""
 
         domain_lower = domain.lower()
 
-        # 1. 检查精确域名匹配（只匹配完全相同的域名）
-        if domain_lower in self.whitelist_domains:
-            return True, f"精确匹配: {domain}"
+        for rule in self.auto_classify_rules:
+            if rule['action'] == 'skip':
+                rule_domain = rule['domain'].lower()
 
-        # 2. 检查正则表达式模式匹配（包括通配符转换的正则）
-        for pattern in self.whitelist_patterns:
-            if pattern.match(domain_lower):
-                return True, f"模式匹配: {pattern.pattern}"
-
-        # 3. 检查源特定白名单
-        if source_name:
-            source_whitelist = self.config["whitelist"].get("source_specific", {}).get(source_name, {})
-
-            # 检查源特定精确域名（只精确匹配）
-            source_domains = source_whitelist.get("domains", [])
-            for wd in source_domains:
-                if domain_lower == wd.lower():
-                    return True, f"源特定精确匹配: {wd}"
-
-            # 检查源特定通配符域名
-            source_wildcards = source_whitelist.get("wildcard_domains", [])
-            for wildcard in source_wildcards:
-                try:
-                    regex_pattern = self._wildcard_to_regex(wildcard)
-                    pattern = re.compile(regex_pattern, re.IGNORECASE)
-                    if pattern.match(domain_lower):
-                        return True, f"源特定通配符匹配: {wildcard}"
-                except re.error:
-                    continue
-
-            # 检查源特定正则模式
-            source_patterns = source_whitelist.get("patterns", [])
-            for pattern_str in source_patterns:
-                try:
-                    pattern = re.compile(pattern_str, re.IGNORECASE)
-                    if pattern.match(domain_lower):
-                        return True, f"源特定模式匹配: {pattern_str}"
-                except re.error:
-                    continue
+                # 支持通配符匹配
+                if rule_domain.startswith('*.'):
+                    # 通配符匹配子域名
+                    pattern_domain = rule_domain[2:]  # 移除 *.
+                    if domain_lower == pattern_domain or domain_lower.endswith('.' + pattern_domain):
+                        return True, f"自动分类跳过规则: {rule['domain']}"
+                elif domain_lower == rule_domain:
+                    # 精确匹配
+                    return True, f"自动分类跳过规则: {rule['domain']}"
 
         return False, ""
+
+    def get_auto_classify_action(self, domain: str) -> Tuple[str, str]:
+        """
+        根据自动分类规则获取域名的动作
+
+        Args:
+            domain: 域名
+
+        Returns:
+            (动作类型, 匹配原因)
+        """
+        if not self.auto_classify_rules:
+            return None, ""
+
+        domain_lower = domain.lower()
+
+        for rule in self.auto_classify_rules:
+            if rule['action'] in ['remove', 'low_priority', 'high_priority']:
+                rule_domain = rule['domain'].lower()
+
+                # 支持通配符匹配
+                if rule_domain.startswith('*.'):
+                    # 通配符匹配子域名
+                    pattern_domain = rule_domain[2:]  # 移除 *.
+                    if domain_lower == pattern_domain or domain_lower.endswith('.' + pattern_domain):
+                        return rule['action'], f"自动分类规则: {rule['domain']}"
+                elif domain_lower == rule_domain:
+                    # 精确匹配
+                    return rule['action'], f"自动分类规则: {rule['domain']}"
+
+        return None, ""
 
     def is_domain_level_rule(self, url_string: str) -> bool:
         """
@@ -711,7 +775,7 @@ class SearXNGHostnamesGenerator:
         Args:
             url: 域名列表URL
             format_type: 格式类型，"domain" 或 "ublock"
-            source_name: 数据源名称（用于白名单过滤）
+            source_name: 数据源名称（用于自动分类）
 
         Returns:
             (域名集合, 统计信息)
@@ -724,7 +788,8 @@ class SearXNGHostnamesGenerator:
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
-            'whitelist_filtered': 0  # 被白名单过滤的数量
+            'auto_classified': 0,  # 自动分类处理的数量
+            'skipped_domains': 0   # 跳过的域名数量
         }
 
         retry_count = self.config["request_config"]["retry_count"]
@@ -746,8 +811,8 @@ class SearXNGHostnamesGenerator:
                 ignored_samples = []
                 accepted_samples = []
                 comment_samples = []
-                path_samples = []  # 新增：路径规则样本
-                whitelist_samples = []  # 新增：白名单过滤样本
+                path_samples = []  # 路径规则样本
+                skip_samples = []  # 跳过的域名样本
 
                 # 解析域名
                 for line_num, line in enumerate(response.text.strip().split('\n'), 1):
@@ -782,13 +847,12 @@ class SearXNGHostnamesGenerator:
                                     ignore_reason = None if domain else "无效域名"
 
                         if domain:
-                            # 检查白名单
-                            is_whitelisted, whitelist_reason = self.is_whitelisted(domain, source_name)
-
-                            if is_whitelisted:
-                                stats['whitelist_filtered'] += 1
-                                if len(whitelist_samples) < 3:
-                                    whitelist_samples.append(f"{line} -> {domain} ({whitelist_reason})")
+                            # 检查是否应该跳过此域名
+                            should_skip, skip_reason = self.should_skip_domain(domain, source_name)
+                            if should_skip:
+                                stats['skipped_domains'] += 1
+                                if len(skip_samples) < 3:
+                                    skip_samples.append(f"{line} -> {domain} ({skip_reason})")
                             else:
                                 if domain in domains:
                                     stats['duplicate_domains'] += 1
@@ -826,7 +890,7 @@ class SearXNGHostnamesGenerator:
                 print(f"  - 忽略(注释): {stats['ignored_comments']}")
                 print(f"  - 忽略(无效域名): {stats['invalid_domains']}")
                 print(f"  - 重复域名: {stats['duplicate_domains']}")
-                print(f"  - 白名单过滤: {stats['whitelist_filtered']}")
+                print(f"  - 跳过域名: {stats['skipped_domains']}")
 
                 # 显示样本
                 if accepted_samples:
@@ -834,10 +898,10 @@ class SearXNGHostnamesGenerator:
                     for sample in accepted_samples:
                         print(f"    ✓ {sample}")
 
-                if whitelist_samples:
-                    print(f"  - 白名单过滤样本:")
-                    for sample in whitelist_samples:
-                        print(f"    🚫 {sample}")
+                if skip_samples:
+                    print(f"  - 跳过的域名样本:")
+                    for sample in skip_samples:
+                        print(f"    ⏭️ {sample}")
 
                 if path_samples:
                     print(f"  - 忽略的路径规则样本:")
@@ -1527,9 +1591,11 @@ class SearXNGHostnamesGenerator:
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
-            'whitelist_filtered': 0
+            'auto_classified': 0,
+            'skipped_domains': 0
         }
 
+        # 从在线源收集域名
         for source in self.config["sources"]:
             if not source.get("enabled", True):
                 continue
@@ -1542,14 +1608,72 @@ class SearXNGHostnamesGenerator:
 
             # 累加统计信息
             for key in self.stats:
-                self.stats[key] += source_stats[key]
+                if key in source_stats:
+                    self.stats[key] += source_stats[key]
 
-            action = source.get("action", "remove")
-            if action in categorized_domains:
-                categorized_domains[action].update(domains)
-                print(f"已添加 {len(domains)} 个域名到 {action} 类别")
-            else:
-                print(f"警告: 未知的动作类型 '{action}'")
+            # 处理域名分类
+            source_action = source.get("action", "remove")
+            auto_classified_count = 0
+
+            for domain in list(domains):
+                # 检查自动分类规则
+                auto_action, reason = self.get_auto_classify_action(domain)
+                if auto_action:
+                    # 从原始集合中移除，添加到相应类别
+                    domains.remove(domain)
+                    categorized_domains[auto_action].add(domain)
+                    auto_classified_count += 1
+                    if auto_classified_count <= 5:  # 显示前5个样本
+                        print(f"  🔄 自动分类: {domain} -> {auto_action} ({reason})")
+                else:
+                    # 使用源的默认动作
+                    if source_action in categorized_domains:
+                        categorized_domains[source_action].add(domain)
+
+            if auto_classified_count > 0:
+                print(f"  ✅ 自动分类处理: {auto_classified_count} 个域名")
+                self.stats['auto_classified'] += auto_classified_count
+
+            print(f"已添加 {len(domains)} 个域名到 {source_action} 类别")
+
+        # 从自定义规则文件加载
+        print(f"\n处理自定义规则文件...")
+        if self.config.get("custom_rules", {}).get("enabled", False):
+            custom_sources = self.config["custom_rules"]["sources"]
+
+            for source in custom_sources:
+                if not source.get("enabled", True):
+                    continue
+
+                print(f"\n处理自定义规则: {source['name']}")
+                file_path = source["file"]
+                format_type = source.get("format", "domain")
+                action = source.get("action", "remove")
+
+                if not os.path.exists(file_path):
+                    print(f"  ❌ 文件不存在: {file_path}")
+                    continue
+
+                domains, replace_rules, source_stats = self.load_custom_rules_from_file(
+                    file_path, format_type, action
+                )
+
+                # 累加统计信息
+                self.stats['total_rules'] += source_stats['total_rules']
+                self.stats['parsed_domains'] += source_stats['parsed_domains']
+                self.stats['invalid_domains'] += source_stats['invalid_domains']
+                self.stats['ignored_comments'] += source_stats['ignored_comments']
+
+                # 将域名添加到相应类别
+                if action in categorized_domains:
+                    categorized_domains[action].update(domains)
+
+                # 处理替换规则
+                if action == "replace" and replace_rules:
+                    # 更新配置中的替换规则
+                    self.config["replace_rules"].update(replace_rules)
+
+                print(f"  ✅ 从文件加载了 {len(domains) + len(replace_rules)} 个规则到 {action} 类别")
 
         return categorized_domains
 
@@ -1595,29 +1719,48 @@ class SearXNGHostnamesGenerator:
         print(f"   - 忽略特定路径规则: {parsing_config.get('ignore_specific_paths', True)}")
         print(f"   - 严格域名级别检查: {parsing_config.get('strict_domain_level_check', True)}")
 
-        # 显示白名单配置
-        whitelist_config = self.config.get("whitelist", {})
-        if whitelist_config.get("enabled", False):
-            print(f"🚫 白名单配置:")
-            print(f"   - 白名单模式: {whitelist_config.get('mode', 'remove_from_all')}")
-            print(f"   - 精确域名: {len(whitelist_config.get('domains', []))} 个")
-            print(f"   - 模式规则: {len(whitelist_config.get('patterns', []))} 个")
-            print(f"   - 通配符域名: {len(whitelist_config.get('wildcard_domains', []))} 个")
-            print(f"   - 外部源: {len(whitelist_config.get('sources', []))} 个")
-            print(f"   ⚠️  使用精确匹配模式，子域名需要通配符或正则表达式")
+        # 显示自动分类配置
+        auto_classify_config = self.config.get("auto_classify", {})
+        if auto_classify_config.get("enabled", False):
+            print(f"🔄 自动分类配置:")
+            print(f"   - 内置规则: {len(auto_classify_config.get('rules', []))} 个")
+            print(f"   - 外部源: {len([s for s in auto_classify_config.get('sources', []) if s.get('enabled', True)])} 个")
+            print(f"   - 总计规则: {len(self.auto_classify_rules)} 个")
         else:
-            print(f"🚫 白名单功能已禁用")
+            print(f"🔄 自动分类功能已禁用")
+
+        # 显示自定义规则配置
+        custom_rules_config = self.config.get("custom_rules", {})
+        if custom_rules_config.get("enabled", False):
+            enabled_sources = [s for s in custom_rules_config.get("sources", []) if s.get("enabled", True)]
+            print(f"📁 自定义规则文件:")
+            print(f"   - 启用的文件源: {len(enabled_sources)} 个")
+            for source in enabled_sources:
+                print(f"     • {source['name']}: {source['file']} ({source.get('action', 'remove')})")
+        else:
+            print(f"📁 自定义规则文件功能已禁用")
 
         # 收集域名
         categorized_domains = self.collect_domains()
 
+        # 处理自动分类替换规则
+        auto_replace_rules = {}
+        for rule in self.auto_classify_rules:
+            if rule['action'] == 'replace':
+                old_regex = f"(.*\\.)?{re.escape(rule['old_domain'])}$"
+                auto_replace_rules[old_regex] = rule['new_domain']
+
         rules = {}
 
         # 替换规则 (字典格式)
-        if self.config["replace_rules"]:
-            rules["replace"] = self.config["replace_rules"]
-            # 记录替换规则的域名数量（替换规则是键值对，键就是域名规则）
-            self.category_domain_counts["replace"] = len(self.config["replace_rules"])
+        all_replace_rules = {}
+        all_replace_rules.update(self.config["replace_rules"])
+        all_replace_rules.update(auto_replace_rules)
+
+        if all_replace_rules:
+            rules["replace"] = all_replace_rules
+            # 记录替换规则的域名数量
+            self.category_domain_counts["replace"] = len(all_replace_rules)
 
         # 移除规则 (列表格式) - 使用优化的合并
         print(f"\n生成移除规则...")
@@ -1716,7 +1859,7 @@ class SearXNGHostnamesGenerator:
                         domain_count = self.category_domain_counts.get(rule_type, 0)
 
                         f.write(f"# SearXNG {rule_type} rules\n")
-                        f.write(f"# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues + Precise Whitelist)\n")
+                        f.write(f"# Generated by SearXNG Hostnames Generator (Enhanced - Complete Edition)\n")
                         f.write(f"# Total rules: {rule_count}\n")
                         f.write(f"# Total domains: {domain_count}\n")
 
@@ -1730,14 +1873,16 @@ class SearXNGHostnamesGenerator:
                         else:
                             f.write(f"# Multi-rule performance optimized with advanced pattern matching\n")
 
-                        f.write(f"# Note: Rules targeting specific paths are ignored to prevent over-blocking\n")
-                        f.write(f"# Fixed: TLD optimization now preserves complete domain structure\n")
-                        f.write(f"# Smart domain sorting and TLD grouping applied for optimal performance\n")
+                        f.write(f"# Features: Auto-classification, custom rule files, TLD optimization\n")
+                        f.write(f"# Rules targeting specific paths are ignored to prevent over-blocking\n")
 
-                        # 添加白名单信息
-                        if self.config.get("whitelist", {}).get("enabled", False):
-                            f.write(f"# Precise whitelist filtering enabled - {self.stats.get('whitelist_filtered', 0)} domains filtered\n")
-                            f.write(f"# Whitelist uses exact matching - use wildcards for subdomain matching\n")
+                        # 添加自动分类信息
+                        if self.config.get("auto_classify", {}).get("enabled", False):
+                            f.write(f"# Auto-classification enabled - {self.stats.get('auto_classified', 0)} domains auto-classified\n")
+
+                        # 添加自定义文件信息
+                        if self.config.get("custom_rules", {}).get("enabled", False):
+                            f.write(f"# Custom rule files enabled - supports external rule loading\n")
 
                         f.write(f"\n")
 
@@ -1759,19 +1904,22 @@ class SearXNGHostnamesGenerator:
                 with open(main_config_path, 'w', encoding='utf-8') as f:
                     f.write("# SearXNG hostnames configuration\n")
                     f.write("# This file references external rule files\n")
-                    f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues + Precise Whitelist)\n")
+                    f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Complete Edition)\n")
+                    f.write("# Features: Auto-classification, custom rule files, TLD optimization\n")
 
                     if self.force_single_regex or self.config["optimization"].get("force_single_regex", False):
                         f.write("# Advanced TLD-optimized single-line regex mode enabled\n")
                     else:
                         f.write("# Multi-rule performance optimized with advanced pattern matching\n")
 
-                    f.write("# Fixed: TLD optimization preserves complete domain structure (.pixnet.net vs .pixnet)\n")
-                    f.write("# Smart domain sorting and TLD grouping applied\n")
+                    f.write("# Fixed: TLD optimization preserves complete domain structure\n")
 
-                    # 添加白名单信息
-                    if self.config.get("whitelist", {}).get("enabled", False):
-                        f.write("# Precise whitelist filtering enabled for exact control\n")
+                    # 添加功能信息
+                    if self.config.get("auto_classify", {}).get("enabled", False):
+                        f.write("# Auto-classification enabled for intelligent rule sorting\n")
+
+                    if self.config.get("custom_rules", {}).get("enabled", False):
+                        f.write("# Custom rule files enabled for external rule management\n")
 
                     f.write("\n")
                     yaml.dump(main_config, f, default_flow_style=False, allow_unicode=True, indent=2)
@@ -1797,7 +1945,7 @@ class SearXNGHostnamesGenerator:
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write("# SearXNG hostnames configuration\n")
-                f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Fixed TLD Issues + Precise Whitelist)\n")
+                f.write("# Generated by SearXNG Hostnames Generator (Enhanced - Complete Edition)\n")
 
                 # 添加总体统计信息
                 total_rules = sum(len(rule_data) if isinstance(rule_data, (list, dict)) else 0 for rule_data in rules.values())
@@ -1814,14 +1962,15 @@ class SearXNGHostnamesGenerator:
                 else:
                     f.write("# Multi-rule performance optimized with advanced pattern matching\n")
 
-                f.write("# Note: Rules targeting specific paths are ignored to prevent over-blocking\n")
-                f.write("# Fixed: TLD optimization now preserves complete domain structure (*.pixnet.net vs *.pixnet)\n")
-                f.write("# Smart domain sorting and TLD grouping applied for optimal performance\n")
+                f.write("# Features: Auto-classification, custom rule files, TLD optimization\n")
+                f.write("# Rules targeting specific paths are ignored to prevent over-blocking\n")
 
-                # 添加白名单信息
-                if self.config.get("whitelist", {}).get("enabled", False):
-                    f.write(f"# Precise whitelist filtering enabled - {self.stats.get('whitelist_filtered', 0)} domains filtered\n")
-                    f.write(f"# Whitelist uses exact matching - use wildcards for subdomain matching\n")
+                # 添加功能信息
+                if self.config.get("auto_classify", {}).get("enabled", False):
+                    f.write(f"# Auto-classification enabled - {self.stats.get('auto_classified', 0)} domains auto-classified\n")
+
+                if self.config.get("custom_rules", {}).get("enabled", False):
+                    f.write(f"# Custom rule files enabled - supports external rule management\n")
 
                 f.write("\n")
                 yaml.dump(hostnames_config, f, default_flow_style=False, allow_unicode=True, indent=2)
@@ -1835,8 +1984,8 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 (高级优化版 - 修复TLD问题 + 精确白名单功能)")
-        print("=" * 85)
+        print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化)")
+        print("=" * 90)
 
         try:
             # 生成规则
@@ -1866,7 +2015,7 @@ class SearXNGHostnamesGenerator:
         Args:
             rules: 生成的规则
         """
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 70)
         print("📊 统计信息:")
 
         total_rules = 0
@@ -1902,7 +2051,8 @@ class SearXNGHostnamesGenerator:
         print(f"  - 忽略(注释): {self.stats['ignored_comments']:,}")
         print(f"  - 忽略(无效域名): {self.stats['invalid_domains']:,}")
         print(f"  - 重复域名: {self.stats['duplicate_domains']:,}")
-        print(f"  - 白名单过滤: {self.stats['whitelist_filtered']:,}")
+        print(f"  - 自动分类处理: {self.stats.get('auto_classified', 0):,}")
+        print(f"  - 跳过域名: {self.stats.get('skipped_domains', 0):,}")
 
         print(f"\n📁 输出目录: {self.config['output']['directory']}")
 
@@ -1919,18 +2069,29 @@ class SearXNGHostnamesGenerator:
         print(f"  - 忽略IP地址: {self.config['parsing']['ignore_ip']}")
         print(f"  - 忽略localhost: {self.config['parsing']['ignore_localhost']}")
 
-        # 白名单配置
-        whitelist_config = self.config.get("whitelist", {})
-        print(f"\n🚫 白名单配置:")
-        if whitelist_config.get("enabled", False):
-            print(f"  - 状态: 已启用 (精确匹配模式)")
-            print(f"  - 模式: {whitelist_config.get('mode', 'remove_from_all')}")
-            print(f"  - 精确域名: {len(whitelist_config.get('domains', []))} 个")
-            print(f"  - 模式规则: {len(whitelist_config.get('patterns', []))} 个")
-            print(f"  - 通配符域名: {len(whitelist_config.get('wildcard_domains', []))} 个")
-            print(f"  - 外部源: {len([s for s in whitelist_config.get('sources', []) if s.get('enabled', True)])} 个")
-            print(f"  - 过滤的域名: {self.stats['whitelist_filtered']:,} 个")
-            print(f"  ⚠️  注意: 精确匹配只匹配完全相同的域名")
+        # 自动分类配置
+        auto_classify_config = self.config.get("auto_classify", {})
+        print(f"\n🔄 自动分类配置:")
+        if auto_classify_config.get("enabled", False):
+            print(f"  - 状态: 已启用")
+            print(f"  - 内置规则: {len(auto_classify_config.get('rules', []))} 个")
+            print(f"  - 外部源: {len([s for s in auto_classify_config.get('sources', []) if s.get('enabled', True)])} 个")
+            print(f"  - 总计规则: {len(self.auto_classify_rules)} 个")
+            print(f"  - 处理域名: {self.stats.get('auto_classified', 0):,} 个")
+            print(f"  - 跳过域名: {self.stats.get('skipped_domains', 0):,} 个")
+        else:
+            print(f"  - 状态: 已禁用")
+
+        # 自定义规则配置
+        custom_rules_config = self.config.get("custom_rules", {})
+        print(f"\n📁 自定义规则文件:")
+        if custom_rules_config.get("enabled", False):
+            print(f"  - 状态: 已启用")
+            enabled_sources = [s for s in custom_rules_config.get("sources", []) if s.get("enabled", True)]
+            print(f"  - 启用的文件源: {len(enabled_sources)} 个")
+            for source in enabled_sources:
+                file_exists = "✅" if os.path.exists(source['file']) else "❌"
+                print(f"    {file_exists} {source['name']}: {source['file']} ({source.get('action', 'remove')})")
         else:
             print(f"  - 状态: 已禁用")
 
@@ -1981,25 +2142,34 @@ class SearXNGHostnamesGenerator:
                     category_ratio = (rule_count / domain_count) * 100
                     print(f"  - {rule_type}: {category_ratio:.1f}% ({domain_count} 个域名 -> {rule_count} 条规则)")
 
-        print(f"\n🔧 新增功能:")
-        print(f"  - ✅ 精确白名单：只匹配完全相同的域名，避免误放行")
-        print(f"  - ✅ 通配符支持：使用 *.baidu.com 匹配所有百度子域名")
-        print(f"  - ✅ 正则表达式：支持复杂的域名匹配模式")
-        print(f"  - ✅ 多源白名单：支持从URL和本地文件加载白名单")
-        print(f"  - ✅ 源特定白名单：可对特定数据源应用不同白名单")
-        print(f"  - ✅ 实时过滤统计：显示被白名单过滤的域名数量")
+        print(f"\n🆕 新增功能:")
+        print(f"  - ✅ 自动分类：支持 remove:baidu.com、low_priority:google.com 等语法")
+        print(f"  - ✅ 自定义文件：支持从外部文件加载各类规则")
+        print(f"  - ✅ 跳过规则：使用 skip:domain.com 跳过特定域名处理")
+        print(f"  - ✅ 替换规则：支持 replace:old.com=new.com 语法")
+        print(f"  - ✅ 多格式支持：支持 domain、regex、ublock、replace 等格式")
+        print(f"  - ✅ 通配符支持：支持 *.baidu.com 语法匹配子域名")
+        print(f"  - ✅ 实时统计：显示处理过程中的各种统计信息")
 
-        print(f"\n🔧 白名单匹配示例:")
-        print(f"  - 精确匹配: 'baidu.com' 只匹配 baidu.com，不匹配 test.baidu.com")
-        print(f"  - 通配符匹配: '*.baidu.com' 匹配 test.baidu.com、www.baidu.com 等")
-        print(f"  - 正则匹配: '.*\\.edu\\..*' 匹配所有教育网站")
+        print(f"\n🔧 自动分类语法示例:")
+        print(f"  - remove:baidu.com          # 将 baidu.com 添加到移除列表")
+        print(f"  - low_priority:google.com   # 将 google.com 添加到低优先级列表")
+        print(f"  - high_priority:wikipedia.org # 将 wikipedia.org 添加到高优先级列表")
+        print(f"  - replace:youtube.com=yt.example.com # 替换规则")
+        print(f"  - skip:github.com           # 跳过 github.com，不进行任何处理")
+        print(f"  - remove:*.csdn.net         # 移除所有 CSDN 子域名")
+
+        print(f"\n📁 自定义文件格式支持:")
+        print(f"  - domain: 纯域名格式 (每行一个域名)")
+        print(f"  - regex: 正则表达式格式 (直接使用的正则)")
+        print(f"  - ublock: uBlock Origin 格式")
+        print(f"  - replace: 替换格式 (old_domain=new_domain)")
 
         print(f"\n🔧 修复说明:")
-        print(f"  - 修复了TLD优化中丢失顶级域名的问题")
-        print(f"  - 现在 'a0cuy6cmk2.pixnet.net' 会正确生成为 '*.pixnet.net$' 而不是 '*.pixnet$'")
-        print(f"  - 改进了多级域名的TLD分组和优化逻辑")
-        print(f"  - 增强了域名结构分析，确保TLD完整性")
-        print(f"  - 移除了父域名匹配，使用精确匹配避免误放行")
+        print(f"  - 保留了原有的 TLD 优化和性能优化功能")
+        print(f"  - 新增了灵活的自动分类系统，替代了原白名单功能")
+        print(f"  - 支持从多种格式的外部文件加载自定义规则")
+        print(f"  - 改进了统计信息显示，更详细地展示处理过程")
 
 
 def create_sample_config():
@@ -2028,80 +2198,87 @@ def create_sample_config():
                 "action": "remove",
                 "format": "domain",
                 "enabled": True
-            },
-            {
-                "name": "Custom Blocklist",
-                "url": "https://example.com/blocklist.txt",
-                "action": "remove",
-                "format": "domain",
-                "enabled": False
             }
         ],
-        "whitelist": {
+
+        "custom_rules": {
             "enabled": True,
-            "mode": "remove_from_all",
             "sources": [
                 {
-                    "name": "Custom Whitelist",
-                    "url": "https://example.com/whitelist.txt",
+                    "name": "Custom Remove Rules",
+                    "file": "./custom_remove.txt",
+                    "action": "remove",
                     "format": "domain",
                     "enabled": False
                 },
                 {
-                    "name": "Local Whitelist",
-                    "file": "./whitelist.txt",
+                    "name": "Custom Low Priority Rules",
+                    "file": "./custom_low_priority.txt",
+                    "action": "low_priority",
                     "format": "domain",
                     "enabled": False
+                },
+                {
+                    "name": "Custom High Priority Rules",
+                    "file": "./custom_high_priority.txt",
+                    "action": "high_priority",
+                    "format": "domain",
+                    "enabled": False
+                },
+                {
+                    "name": "Custom Replace Rules",
+                    "file": "./custom_replace.txt",
+                    "action": "replace",
+                    "format": "replace",
+                    "enabled": False
                 }
-            ],
-            "domains": [
-                "baidu.com",
-                "google.com",
-                "bing.com",
-                "github.com",
-                "stackoverflow.com"
-            ],
-            "patterns": [
-                r".*\.gov\..*",
-                r".*\.edu\..*",
-                r".*wikipedia\..*"
-            ],
-            "wildcard_domains": [
-                "*.github.com",
-                "*.stackoverflow.com",
-                "*.microsoft.com",
-                "*.baidu.com"
-            ],
-            "source_specific": {
-                "Chinese Internet is Dead": {
-                    "domains": ["zhihu.com", "csdn.net"],
-                    "patterns": [r".*\.edu\.cn$"],
-                    "wildcard_domains": ["*.tsinghua.edu.cn"]
-                }
-            }
+            ]
         },
+
+        "auto_classify": {
+            "enabled": True,
+            "sources": [
+                {
+                    "name": "Auto Classify Rules",
+                    "file": "./auto_classify.txt",
+                    "format": "classify",
+                    "enabled": True
+                }
+            ],
+            "rules": [
+                "remove:example.com",
+                "low_priority:google.com",
+                "high_priority:wikipedia.org",
+                "replace:youtube.com=yt.example.com",
+                "skip:github.com"
+            ]
+        },
+
         "replace_rules": {
             '(.*\.)?youtube\.com$': 'yt.example.com',
             '(.*\.)?youtu\.be$': 'yt.example.com',
-            '(.*\.)?reddit\.com$': 'teddit.example.com',
-            '(.*\.)?redd\.it$': 'teddit.example.com',
-            '(www\.)?twitter\.com$': 'nitter.example.com'
+            '(.*\.)?reddit\.com$': 'teddit.example.com'
         },
+
         "fixed_remove": [
             '(.*\.)?facebook.com$'
         ],
+
         "fixed_low_priority": [
             '(.*\.)?google(\..*)?$'
         ],
+
         "fixed_high_priority": [
             '(.*\.)?wikipedia.org$'
         ],
+
         "parsing": {
             "ignore_specific_paths": True,
             "ignore_ip": True,
             "ignore_localhost": True,
             "strict_domain_level_check": True
         },
+
         "optimization": {
             "merge_domains": True,
             "max_domains_per_rule": 256,
@@ -2117,11 +2294,13 @@ def create_sample_config():
             "sort_before_merge": True,
             "enable_advanced_tld_merge": True
         },
+
         "request_config": {
             "timeout": 30,
             "retry_count": 3,
             "retry_delay": 1
         },
+
         "output": {
             "mode": "separate_files",
             "directory": "./rules/",
@@ -2138,24 +2317,78 @@ def create_sample_config():
     with open("config.yaml", "w", encoding="utf-8") as f:
         yaml.dump(sample_config, f, default_flow_style=False, allow_unicode=True, indent=2)
 
+    # 创建示例自动分类文件
+    with open("auto_classify.txt", "w", encoding="utf-8") as f:
+        f.write("""# 自动分类规则示例文件
+# 语法：action:domain
+# 支持的 action：remove, low_priority, high_priority, replace, skip
+
+# 移除规则 - 将域名添加到移除列表
+remove:baidu.com
+remove:*.csdn.net
+remove:zhihu.com
+
+# 低优先级规则
+low_priority:google.com
+low_priority:*.google.com
+
+# 高优先级规则
+high_priority:wikipedia.org
+high_priority:*.wikipedia.org
+
+# 替换规则 - 格式：replace:old_domain=new_domain
+replace:youtube.com=yt.example.com
+replace:twitter.com=nitter.example.com
+
+# 跳过规则 - 跳过处理这些域名
+skip:github.com
+skip:*.github.com
+skip:stackoverflow.com
+""")
+
+    # 创建示例自定义规则文件
+    with open("custom_remove.txt", "w", encoding="utf-8") as f:
+        f.write("""# 自定义移除规则示例
+# 每行一个域名，支持注释
+
+example1.com  # 示例域名1
+example2.com  # 示例域名2
+*.example3.com  # 示例通配符域名
+""")
+
+    with open("custom_replace.txt", "w", encoding="utf-8") as f:
+        f.write("""# 自定义替换规则示例
+# 格式：old_domain=new_domain
+
+old.example.com=new.example.com
+another.old.com=another.new.com
+""")
+
     print("示例配置文件已创建: config.yaml")
-    print("\n🚫 精确白名单配置说明:")
-    print("  - domains: 精确匹配的域名列表（只匹配完全相同的域名）")
-    print("  - patterns: 正则表达式模式列表")
-    print("  - wildcard_domains: 通配符域名列表（如 *.baidu.com 匹配所有百度子域名）")
-    print("  - sources: 从URL或本地文件加载白名单")
-    print("  - source_specific: 对特定数据源应用的白名单")
-    print("\n💡 匹配示例:")
-    print("  - 'baidu.com' 只匹配 baidu.com，不匹配 test.baidu.com")
-    print("  - '*.baidu.com' 匹配 test.baidu.com、www.baidu.com 等子域名")
-    print("  - 如果要屏蔽 test.baidu.com 但保留 baidu.com，不要在白名单中添加 baidu.com")
+    print("示例自动分类文件已创建: auto_classify.txt")
+    print("示例自定义规则文件已创建: custom_remove.txt, custom_replace.txt")
+
+    print("\n🔄 自动分类语法说明:")
+    print("  - remove:domain.com          # 将域名添加到移除列表")
+    print("  - low_priority:domain.com    # 将域名添加到低优先级列表")
+    print("  - high_priority:domain.com   # 将域名添加到高优先级列表")
+    print("  - replace:old.com=new.com    # 替换规则")
+    print("  - skip:domain.com            # 跳过处理此域名")
+    print("  - remove:*.domain.com        # 支持通配符匹配子域名")
+
+    print("\n📁 自定义文件格式说明:")
+    print("  - domain: 纯域名格式，每行一个域名")
+    print("  - regex: 正则表达式格式，直接使用")
+    print("  - ublock: uBlock Origin 格式")
+    print("  - replace: 替换格式，old_domain=new_domain")
+    print("  - classify: 自动分类格式，action:domain")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (高级优化版 - 修复TLD问题 + 精确白名单功能)")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化)")
     parser.add_argument("-c", "--config", help="配置文件路径")
-    parser.add_argument("--create-config", action="store_true", help="创建示例配置文件")
-    parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式（将所有域名合并为一个规则）")
+    parser.add_argument("--create-config", action="store_true", help="创建示例配置文件和示例规则文件")
+    parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式")
 
     args = parser.parse_args()
 
