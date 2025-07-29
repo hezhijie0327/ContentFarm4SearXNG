@@ -128,6 +128,13 @@ class SearXNGHostnamesGenerator:
                     "format": "v2ray",
                     "enabled": True
                 },
+                {
+                    "name": "hezhijie0327 - Geosite2Domain - dev-cn",
+                    "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-dev-cn.txt",
+                    "action": "low_priority",
+                    "format": "v2ray",
+                    "enabled": True
+                },
             ],
 
             # 自定义规则配置（从文件读取）
