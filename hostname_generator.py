@@ -122,6 +122,13 @@ class SearXNGHostnamesGenerator:
                     "enabled": True
                 },
                 {
+                    "name": "hezhijie0327 - Geosite2Domain - scholar-cn",
+                    "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-scholar-cn.txt",
+                    "action": "high_priority",
+                    "format": "v2ray",
+                    "enabled": True
+                },
+                {
                     "name": "hezhijie0327 - Geosite2Domain - scholar-!cn",
                     "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-scholar-!cn.txt",
                     "action": "high_priority",
