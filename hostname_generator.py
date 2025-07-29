@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-SearXNG Hostnames 规则生成器 - 完善版
+SearXNG Hostnames 规则生成器 - 完善版 (支持 v2ray 格式)
 - 支持低优先级/高优先级/替换规则从外部文件读取
 - 白名单功能改为自动分类语法功能，支持 remove:baidu.com 等语法
 - 修复：skip 规则只影响数据源处理，不阻止明确的自动分类规则
+- 新增：支持 v2ray 格式 (domain:example.com, full:example.com)
 
 pip install requests pyyaml argparse
 """
@@ -109,6 +110,20 @@ class SearXNGHostnamesGenerator:
                     "url": "https://raw.githubusercontent.com/obgnail/chinese-internet-is-dead/master/blocklist.txt",
                     "action": "remove",
                     "format": "ublock",
+                    "enabled": True
+                },
+                {
+                    "name": "hezhijie0327 - Geosite2Domain - dev",
+                    "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-dev.txt",
+                    "action": "high_priority",
+                    "format": "v2ray",
+                    "enabled": True
+                },
+                {
+                    "name": "hezhijie0327 - Geosite2Domain - scholar-!cn",
+                    "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-scholar-!cn.txt",
+                    "action": "high_priority",
+                    "format": "v2ray",
                     "enabled": True
                 },
             ],
@@ -234,6 +249,59 @@ class SearXNGHostnamesGenerator:
                 self._deep_merge(base_dict[key], value)
             else:
                 base_dict[key] = value
+
+    def parse_v2ray_rule(self, rule: str) -> Tuple[str, str]:
+        """
+        解析 v2ray 格式规则，提取域名
+
+        支持的格式：
+        - domain:example.com  # 匹配域名及所有子域名
+        - full:example.com    # 完全匹配域名
+
+        Args:
+            rule: v2ray 规则字符串
+
+        Returns:
+            (域名或 None, 忽略原因)
+        """
+        rule = rule.strip()
+        if not rule or rule.startswith('#'):
+            return None, "注释或空行"
+
+        # 处理行末注释
+        if '#' in rule:
+            comment_pos = rule.find('#')
+            rule = rule[:comment_pos].strip()
+            if not rule:
+                return None, "仅包含注释"
+
+        # 检查是否是 v2ray 格式
+        if ':' not in rule:
+            return None, "非 v2ray 格式"
+
+        # 分离前缀和域名
+        parts = rule.split(':', 1)
+        if len(parts) != 2:
+            return None, "无效的 v2ray 格式"
+
+        prefix = parts[0].strip().lower()
+        domain_part = parts[1].strip()
+
+        # 验证前缀
+        if prefix not in ['domain', 'full']:
+            return None, f"不支持的 v2ray 前缀: {prefix}"
+
+        if not domain_part:
+            return None, "域名部分为空"
+
+        # 清理和验证域名
+        cleaned_domain = self.clean_domain(domain_part)
+        if not cleaned_domain:
+            return None, "无效域名"
+
+        # v2ray 的 domain 和 full 在这里都当作普通域名处理
+        # 因为 SearXNG 的正则会自动包含子域名匹配
+        return cleaned_domain, None
 
     def load_auto_classify_rules(self) -> None:
         """
@@ -418,7 +486,7 @@ class SearXNGHostnamesGenerator:
 
         Args:
             file_path: 文件路径
-            format_type: 格式类型 (domain, regex, ublock, replace)
+            format_type: 格式类型 (domain, regex, ublock, v2ray, replace)
             action: 动作类型 (remove, low_priority, high_priority, replace)
 
         Returns:
@@ -437,7 +505,7 @@ class SearXNGHostnamesGenerator:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            print(f"  📁 正在解析文件: {file_path}")
+            print(f"  📁 正在解析文件: {file_path} (格式: {format_type})")
 
             for line_num, line in enumerate(content.strip().split('\n'), 1):
                 line = line.strip()
@@ -481,6 +549,19 @@ class SearXNGHostnamesGenerator:
                             stats['parsed_domains'] += 1
                         else:
                             stats['invalid_domains'] += 1
+
+                    elif format_type == "v2ray":
+                        # v2ray 格式
+                        domain, ignore_reason = self.parse_v2ray_rule(line)
+                        if domain:
+                            domains.add(domain)
+                            stats['parsed_domains'] += 1
+                            if stats['parsed_domains'] <= 3:  # 显示前3个解析样本
+                                print(f"    ✅ v2ray 解析: {line} -> {domain}")
+                        else:
+                            stats['invalid_domains'] += 1
+                            if ignore_reason and stats['invalid_domains'] <= 3:
+                                print(f"    ❌ v2ray 忽略: {line} ({ignore_reason})")
 
                     else:  # domain 格式
                         # 处理行末注释
@@ -920,7 +1001,7 @@ class SearXNGHostnamesGenerator:
 
         Args:
             url: 域名列表URL
-            format_type: 格式类型，"domain" 或 "ublock"
+            format_type: 格式类型，"domain", "ublock", 或 "v2ray"
             source_name: 数据源名称（用于自动分类）
 
         Returns:
@@ -944,7 +1025,7 @@ class SearXNGHostnamesGenerator:
 
         for attempt in range(retry_count):
             try:
-                print(f"正在获取 {url} (尝试 {attempt + 1}/{retry_count})")
+                print(f"正在获取 {url} (尝试 {attempt + 1}/{retry_count}) - 格式: {format_type}")
 
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -972,6 +1053,14 @@ class SearXNGHostnamesGenerator:
                         if format_type == "ublock":
                             # 使用 uBlock 语法解析
                             domain, ignore_reason = self.parse_ublock_rule(line)
+                        elif format_type == "v2ray":
+                            # 使用 v2ray 语法解析
+                            domain, ignore_reason = self.parse_v2ray_rule(line)
+                            # 显示 v2ray 解析样本
+                            if domain and len(accepted_samples) < 3:
+                                accepted_samples.append(f"v2ray: {line} -> {domain}")
+                            elif ignore_reason and len(ignored_samples) < 3:
+                                ignored_samples.append(f"v2ray: {line} ({ignore_reason})")
                         else:
                             # 普通域名格式 - 也需要处理行末注释
                             cleaned_line = line
@@ -1005,8 +1094,8 @@ class SearXNGHostnamesGenerator:
                                 else:
                                     domains.add(domain)
                                     stats['parsed_domains'] += 1
-                                    # 记录一些被接受的规则样本
-                                    if len(accepted_samples) < 3:
+                                    # 记录一些被接受的规则样本（非 v2ray 格式的）
+                                    if format_type != "v2ray" and len(accepted_samples) < 3:
                                         accepted_samples.append(f"{line} -> {domain}")
                         else:
                             # 统计忽略原因
@@ -1021,7 +1110,7 @@ class SearXNGHostnamesGenerator:
                                     comment_samples.append(line)
                             elif ignore_reason == "无效域名":
                                 stats['invalid_domains'] += 1
-                                if len(ignored_samples) < 3:
+                                if format_type != "v2ray" and len(ignored_samples) < 3:
                                     ignored_samples.append(line)
 
                     except Exception as e:
@@ -1891,7 +1980,7 @@ class SearXNGHostnamesGenerator:
             print(f"📁 自定义规则文件:")
             print(f"   - 启用的文件源: {len(enabled_sources)} 个")
             for source in enabled_sources:
-                print(f"     • {source['name']}: {source['file']} ({source.get('action', 'remove')})")
+                print(f"     • {source['name']}: {source['file']} ({source.get('action', 'remove')}) - 格式: {source.get('format', 'domain')}")
         else:
             print(f"📁 自定义规则文件功能已禁用")
 
@@ -2111,8 +2200,9 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化)")
+        print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray 格式)")
         print("🔧 修复版本：skip 规则只影响数据源处理，不阻止明确的自动分类规则")
+        print("🆕 新增功能：支持 v2ray 格式 (domain:example.com, full:example.com)")
         print("=" * 90)
 
         try:
@@ -2223,7 +2313,8 @@ class SearXNGHostnamesGenerator:
             print(f"  - 启用的文件源: {len(enabled_sources)} 个")
             for source in enabled_sources:
                 file_exists = "✅" if os.path.exists(source['file']) else "❌"
-                print(f"    {file_exists} {source['name']}: {source['file']} ({source.get('action', 'remove')})")
+                format_info = f" - 格式: {source.get('format', 'domain')}"
+                print(f"    {file_exists} {source['name']}: {source['file']} ({source.get('action', 'remove')}){format_info}")
         else:
             print(f"  - 状态: 已禁用")
 
@@ -2279,23 +2370,18 @@ class SearXNGHostnamesGenerator:
                 else:
                     print(f"  - {rule_type}: {domain_count} 个域名 -> {rule_count} 条规则")
 
-        print(f"\n🆕 主要修复:")
-        print(f"  - ✅ skip 规则现在只影响数据源处理，不阻止明确的自动分类规则")
-        print(f"  - ✅ 如果同一域名有 skip 和其他规则，其他规则会覆盖 skip")
-        print(f"  - ✅ 自动分类规则现在会主动添加域名到相应类别")
-        print(f"  - ✅ 确保所有类别的规则文件都会被创建（即使为空）")
-        print(f"  - ✅ 简化了文件头注释，减少不必要的更新")
+        print(f"\n🆕 v2ray 格式支持:")
+        print(f"  - domain:example.com  # 匹配域名及其所有子域名")
+        print(f"  - full:example.com    # 完全匹配指定域名")
+        print(f"  - 两种格式在处理时都会转换为标准域名，由 SearXNG 的正则自动处理子域名匹配")
 
-        if self.stats.get('skip_overridden', 0) > 0:
-            print(f"\n🔄 Skip 规则覆盖详情:")
-            print(f"  - 有 {self.stats.get('skip_overridden', 0)} 个域名的 skip 规则被其他自动分类规则覆盖")
-            print(f"  - 这意味着这些域名不会从数据源跳过，但会被添加到指定类别")
-            print(f"  - 这正是期望的行为：明确的分类规则优先级高于 skip 规则")
-
-        print(f"\n🔧 修复后的 Skip 规则行为:")
-        print(f"  - skip:csdn.net - 只会从数据源的默认处理中跳过 csdn.net")
-        print(f"  - low_priority:csdn.net - 会主动将 csdn.net 添加到低优先级列表")
-        print(f"  - 如果同时存在，low_priority 规则会生效，skip 被覆盖")
+        print(f"\n📁 支持的文件格式:")
+        print(f"  - domain: 纯域名格式 (每行一个域名)")
+        print(f"  - regex: 正则表达式格式 (直接使用的正则)")
+        print(f"  - ublock: uBlock Origin 格式")
+        print(f"  - v2ray: v2ray 格式 (domain:example.com, full:example.com)")
+        print(f"  - replace: 替换格式 (old_domain=new_domain)")
+        print(f"  - classify: 自动分类格式 (action:domain)")
 
         print(f"\n🔧 自动分类语法示例:")
         print(f"  - skip:csdn.net              # 从数据源跳过（但不阻止其他规则）")
@@ -2304,16 +2390,21 @@ class SearXNGHostnamesGenerator:
         print(f"  - high_priority:wikipedia.org # 将 wikipedia.org 添加到高优先级列表")
         print(f"  - replace:youtube.com=yt.example.com # 替换规则")
 
-        print(f"\n📁 自定义文件格式支持:")
-        print(f"  - domain: 纯域名格式 (每行一个域名)")
-        print(f"  - regex: 正则表达式格式 (直接使用的正则)")
-        print(f"  - ublock: uBlock Origin 格式")
-        print(f"  - replace: 替换格式 (old_domain=new_domain)")
+        print(f"\n🔧 修复后的 Skip 规则行为:")
+        print(f"  - skip:csdn.net - 只会从数据源的默认处理中跳过 csdn.net")
+        print(f"  - low_priority:csdn.net - 会主动将 csdn.net 添加到低优先级列表")
+        print(f"  - 如果同时存在，low_priority 规则会生效，skip 被覆盖")
+
+        if self.stats.get('skip_overridden', 0) > 0:
+            print(f"\n🔄 Skip 规则覆盖详情:")
+            print(f"  - 有 {self.stats.get('skip_overridden', 0)} 个域名的 skip 规则被其他自动分类规则覆盖")
+            print(f"  - 这意味着这些域名不会从数据源跳过，但会被添加到指定类别")
+            print(f"  - 这正是期望的行为：明确的分类规则优先级高于 skip 规则")
 
 
 def create_sample_config():
     """
-    创建示例配置文件
+    创建示例配置文件 (支持 v2ray 格式)
     """
     sample_config = {
         "sources": [
@@ -2337,6 +2428,13 @@ def create_sample_config():
                 "action": "remove",
                 "format": "domain",
                 "enabled": True
+            },
+            {
+                "name": "Example v2ray Rules",
+                "url": "https://example.com/v2ray-rules.txt",
+                "action": "remove",
+                "format": "v2ray",
+                "enabled": False
             }
         ],
 
@@ -2369,6 +2467,13 @@ def create_sample_config():
                     "file": "./custom_replace.txt",
                     "action": "replace",
                     "format": "replace",
+                    "enabled": False
+                },
+                {
+                    "name": "Custom v2ray Rules",
+                    "file": "./custom_v2ray.txt",
+                    "action": "remove",
+                    "format": "v2ray",
                     "enabled": False
                 }
             ]
@@ -2508,9 +2613,41 @@ old.example.com=new.example.com
 another.old.com=another.new.com
 """)
 
+    # 创建示例 v2ray 规则文件
+    with open("custom_v2ray.txt", "w", encoding="utf-8") as f:
+        f.write("""# v2ray 格式规则示例文件
+# 支持的格式：
+# domain:example.com  - 匹配域名及其所有子域名
+# full:example.com    - 完全匹配指定域名
+
+# 域名级别匹配（包括子域名）
+domain:scopus.com
+domain:researchgate.net
+domain:academia.edu
+
+# 完全匹配
+full:scholar.google.ae
+full:scholar.google.com.hk
+full:pubmed.ncbi.nlm.nih.gov
+
+# 内容农场域名
+domain:csdn.net
+domain:jianshu.com
+domain:zhihu.com
+
+# 注释示例
+# domain:example.com  # 这是注释
+""")
+
     print("示例配置文件已创建: config.yaml")
     print("示例自动分类文件已创建: auto_classify.txt")
     print("示例自定义规则文件已创建: custom_remove.txt, custom_replace.txt")
+    print("🆕 示例 v2ray 规则文件已创建: custom_v2ray.txt")
+
+    print("\n🆕 v2ray 格式说明:")
+    print("  - domain:example.com         # 匹配域名及其所有子域名")
+    print("  - full:example.com           # 完全匹配指定域名")
+    print("  - 两种格式都会转换为标准域名，SearXNG 的正则会自动处理子域名匹配")
 
     print("\n🔄 修复后的自动分类语法说明:")
     print("  - skip:domain.com            # 只从数据源跳过，不阻止其他规则")
@@ -2525,16 +2662,17 @@ another.old.com=another.new.com
     print("  - 如果同一域名有多个规则，明确的分类规则会覆盖 skip")
     print("  - 例如：skip:csdn.net + low_priority:csdn.net = csdn.net 被添加到低优先级")
 
-    print("\n📁 自定义文件格式说明:")
+    print("\n📁 支持的文件格式:")
     print("  - domain: 纯域名格式，每行一个域名")
     print("  - regex: 正则表达式格式，直接使用")
     print("  - ublock: uBlock Origin 格式")
+    print("  - v2ray: v2ray 格式 (domain:example.com, full:example.com)")
     print("  - replace: 替换格式，old_domain=new_domain")
     print("  - classify: 自动分类格式，action:domain")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化) - Skip 修复版")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray格式) - Skip 修复版")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--create-config", action="store_true", help="创建示例配置文件和示例规则文件")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式")
