@@ -7,7 +7,7 @@ SearXNG Hostnames 规则生成器 - 完善版 (支持 v2ray 格式 - 保持原�
 - 新增：支持 v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)
 - 修正：保持原始域名结构，不移除 www. 等前缀
 - 🆕 新增：支持 CSV 格式解析，可指定特定列读取 Hostname
-- 🔄 优化：特定路径规则设置为低优先级，而不是直接忽略
+- 🔄 修复：特定路径规则正确识别并设置为低优先级
 
 pip install requests pyyaml argparse
 """
@@ -42,7 +42,7 @@ class SearXNGHostnamesGenerator:
             'total_rules': 0,
             'parsed_domains': 0,
             'ignored_with_path': 0,
-            'path_to_low_priority': 0,  # 新增：特定路径设置为低优先级的数量
+            'path_to_low_priority': 0,  # 特定路径设置为低优先级的数量
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
@@ -154,44 +154,25 @@ class SearXNGHostnamesGenerator:
                     },
                 ],
                 # 直接在配置中定义的自动分类规则
-                "rules": [
-                    # 语法示例：
-                    # "remove:example.com",           # 将 example.com 添加到移除列表
-                    # "low_priority:google.com",      # 将 google.com 添加到低优先级列表
-                    # "high_priority:wikipedia.org",  # 将 wikipedia.org 添加到高优先级列表
-                    # "replace:youtube.com=yt.example.com",  # 替换规则
-                    # "skip:baidu.com",               # 跳过从数据源处理此域名（但不阻止其他自动分类规则）
-                ]
+                "rules": []
             },
 
             # 域名替换规则（保留原配置方式）
-            "replace_rules": {
-                #'(.*\.)?youtube\.com$': 'yt.example.com',
-                #'(.*\.)?youtu\.be$': 'yt.example.com',
-                #'(.*\.)?reddit\.com$': 'teddit.example.com',
-                #'(.*\.)?redd\.it$': 'teddit.example.com',
-                #'(www\.)?twitter\.com$': 'nitter.example.com'
-            },
+            "replace_rules": {},
 
             # 固定的移除规则
-            "fixed_remove": [
-                #'(.*\.)?facebook.com$'
-            ],
+            "fixed_remove": [],
 
             # 固定的低优先级规则
-            "fixed_low_priority": [
-                #'(.*\.)?google(\..*)?$'
-            ],
+            "fixed_low_priority": [],
 
             # 固定的高优先级规则
-            "fixed_high_priority": [
-                #'(.*\.)?wikipedia.org$'
-            ],
+            "fixed_high_priority": [],
 
             # 解析配置
             "parsing": {
-                "ignore_specific_paths": False,     # 🔄 修改：默认不忽略特定路径规则
-                "specific_path_action": "low_priority",  # 🆕 新增：特定路径规则的处理方式 (ignore/low_priority/keep_action)
+                "ignore_specific_paths": False,     # 不忽略特定路径规则
+                "specific_path_action": "low_priority",  # 特定路径规则处理方式
                 "ignore_ip": True,     # 忽略IP地址
                 "ignore_localhost": True,  # 忽略本地主机
                 "strict_domain_level_check": True,  # 严格检查域名级别规则
@@ -846,7 +827,7 @@ class SearXNGHostnamesGenerator:
 
                     elif format_type == "ublock":
                         # uBlock 格式
-                        domain, ignore_reason = self.parse_ublock_rule(line)
+                        domain, ignore_reason, is_path_rule = self.parse_ublock_rule(line)
                         if domain:
                             domains.add(domain)
                             stats['parsed_domains'] += 1
@@ -1154,60 +1135,9 @@ class SearXNGHostnamesGenerator:
 
         return None
 
-    def is_domain_level_rule(self, url_string: str) -> bool:
-        """
-        判断是否是域名级别的规则（而非特定路径规则）
-
-        Args:
-            url_string: URL字符串
-
-        Returns:
-            是否是域名级别的规则
-        """
-        url_string = url_string.strip()
-
-        # 严格检查模式
-        if self.config["parsing"].get("strict_domain_level_check", True):
-            # 这些模式被认为是域名级别的规则：
-            domain_level_patterns = [
-                # uBlock 域名级别模式 - 精确模式
-                r'^\*://\*?\.?[a-zA-Z0-9.-]+/?$',                    # *://*.example.com 或 *://*.example.com/
-                r'^\*://\*?\.?[a-zA-Z0-9.-]+/\*?$',                 # *://*.example.com/*
-                r'^\*://[a-zA-Z0-9.-]+/?$',                         # *://example.com 或 *://example.com/
-                r'^\*://[a-zA-Z0-9.-]+/\*?$',                       # *://example.com/*
-                r'^\|\|[a-zA-Z0-9.-]+\^?$',                         # ||example.com^
-                r'^[a-zA-Z0-9.-]+/?$',                              # example.com 或 example.com/
-                r'^[a-zA-Z0-9.-]+/\*?$',                            # example.com/* 或 example.com/
-            ]
-
-            # 检查是否匹配域名级别模式
-            for pattern in domain_level_patterns:
-                if re.match(pattern, url_string):
-                    # 额外检查：如果包含具体路径（除了/和/*），则不是域名级别
-                    if self._has_specific_path(url_string):
-                        return False
-                    return True
-
-            return False
-        else:
-            # 兼容模式（原来的逻辑）
-            domain_level_patterns = [
-                r'^\*://\*?\.?[a-zA-Z0-9.-]+/?$',
-                r'^\*://\*?\.?[a-zA-Z0-9.-]+/\*$',
-                r'^\|\|[a-zA-Z0-9.-]+\^?$',
-                r'^[a-zA-Z0-9.-]+/?$',
-                r'^[a-zA-Z0-9.-]+/\*$',
-            ]
-
-            for pattern in domain_level_patterns:
-                if re.match(pattern, url_string):
-                    return True
-
-            return False
-
     def _has_specific_path(self, url_string: str) -> bool:
         """
-        检查URL是否包含具体的路径（非域名级别）
+        🔄 修复：检查URL是否包含具体的路径（非域名级别）
 
         Args:
             url_string: URL字符串
@@ -1228,9 +1158,18 @@ class SearXNGHostnamesGenerator:
             domain_and_path = url_part.split('/', 1)
             if len(domain_and_path) > 1:
                 path_part = domain_and_path[1]
-                # 如果路径不是空、单个*或空字符串，则认为是具体路径
+                # 🔄 修复：更精确地识别特定路径
                 if path_part and path_part not in ['', '*']:
-                    return True
+                    # 检查是否包含文件扩展名或查询参数，这些都是特定路径的标志
+                    if ('.' in path_part and any(ext in path_part.lower() for ext in ['.php', '.asp', '.jsp', '.html', '.htm', '.cgi'])) or \
+                       ('?' in path_part) or \
+                       ('=' in path_part) or \
+                       (len(path_part) > 3 and not path_part.endswith('*')):  # 长路径且不以*结尾
+                        return True
+
+                    # 检查是否是明显的具体路径（不仅仅是*）
+                    if path_part != '*' and '.' not in path_part and len(path_part) > 10:
+                        return True
 
         return False
 
@@ -1246,27 +1185,35 @@ class SearXNGHostnamesGenerator:
         """
         rule = rule.strip()
 
+        # 🔄 修复：对于特定路径规则，仍然尝试提取域名
         # 首先检查是否包含具体路径
-        if self._has_specific_path(rule):
-            # 对于包含具体路径的规则，需要更谨慎地提取域名
-            return self._extract_domain_from_path_rule(rule)
+        has_specific_path = self._has_specific_path(rule)
 
-        # uBlock 语法模式 - 仅用于域名级别规则
+        # uBlock 语法模式 - 用于所有规则
         patterns = [
             # *://*.domain.com/* 或 *://*.domain.com (通配符子域名)
-            r'^\*://\*\.([a-zA-Z0-9.-]+)(?:/\*?)?$',
+            r'^\*://\*\.([a-zA-Z0-9.-]+)(?:/.*)?$',
             # *://domain.com/* 或 *://domain.com (无通配符)
-            r'^\*://([a-zA-Z0-9.-]+)(?:/\*?)?$',
-            # ||domain.com^
-            r'^\|\|([a-zA-Z0-9.-]+)\^?$',
+            r'^\*://([a-zA-Z0-9.-]+)(?:/.*)?$',
+            # ||domain.com^ 或 ||domain.com/path
+            r'^\|\|([a-zA-Z0-9.-]+)(?:/.*)?(?:\^)?$',
             # 普通域名格式
-            r'^([a-zA-Z0-9.-]+)(?:/\*?)?$',
+            r'^([a-zA-Z0-9.-]+)(?:/.*)?$',
+            # *://*/path - 特殊情况，提取通配符前的域名
+            r'^\*://\*/(.+)$',
         ]
 
         for pattern in patterns:
             match = re.match(pattern, rule)
             if match:
-                return match.group(1)
+                candidate = match.group(1)
+                # 对于 *://*/path 这种情况，candidate 是路径，我们需要返回 None
+                if candidate and not candidate.startswith('/') and '.' in candidate:
+                    return candidate
+
+        # 🔄 修复：对于 *://*/filename 这种格式，我们无法提取有效域名，返回 None
+        if rule.startswith('*://*/'):
+            return None
 
         # 通用域名提取（最后的后备方案）
         domain_match = re.search(r'([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', rule)
@@ -1278,67 +1225,19 @@ class SearXNGHostnamesGenerator:
 
         return None
 
-    def _extract_domain_from_path_rule(self, rule: str) -> str:
+    def parse_ublock_rule(self, rule: str) -> Tuple[str, str, bool]:
         """
-        从包含路径的规则中提取域名
-
-        Args:
-            rule: 包含路径的规则字符串
-
-        Returns:
-            域名或 None
-        """
-        rule = rule.strip()
-
-        # 🔄 修改：根据配置决定如何处理特定路径规则
-        specific_path_action = self.config["parsing"].get("specific_path_action", "low_priority")
-
-        if specific_path_action == "ignore":
-            # 原有行为：直接忽略
-            return None
-
-        # 对于其他情况（low_priority 或 keep_action），尝试提取域名
-        # 使用更精确的模式
-        path_patterns = [
-            # *://*.subdomain.domain.com/path/* -> 提取 subdomain.domain.com
-            r'^\*://\*\.([a-zA-Z0-9.-]+)/[^/]+',
-            # *://subdomain.domain.com/path/* -> 提取 subdomain.domain.com
-            r'^\*://([a-zA-Z0-9.-]+)/[^/]+',
-            # ||domain.com/path -> 提取 domain.com
-            r'^\|\|([a-zA-Z0-9.-]+)/[^/]+',
-        ]
-
-        for pattern in path_patterns:
-            match = re.match(pattern, rule)
-            if match:
-                domain = match.group(1)
-                # 只有当这是一个有效域名时才返回
-                if self.is_valid_domain(domain):
-                    return domain
-
-        # 最后的后备方案：通用域名提取
-        domain_match = re.search(r'([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', rule)
-        if domain_match:
-            candidate = domain_match.group(1)
-            if self.is_valid_domain(candidate):
-                return candidate
-
-        return None
-
-    def parse_ublock_rule(self, rule: str) -> Tuple[str, str]:
-        """
-        解析 uBlock Origin 语法规则，提取域名
-        🔄 修改：支持特定路径规则处理方式配置
+        🔄 修复：解析 uBlock Origin 语法规则，提取域名，正确识别特定路径规则
 
         Args:
             rule: uBlock 规则字符串
 
         Returns:
-            (域名或 None, 忽略原因)
+            (域名或 None, 忽略原因, 是否是特定路径规则)
         """
         rule = rule.strip()
         if not rule or rule.startswith('!') or rule.startswith('#'):
-            return None, "注释或空行"
+            return None, "注释或空行", False
 
         # 处理行末注释 - 移除 # 后面的所有内容
         if '#' in rule:
@@ -1348,34 +1247,30 @@ class SearXNGHostnamesGenerator:
 
             # 如果移除注释后规则为空，则忽略
             if not rule:
-                return None, "仅包含注释"
+                return None, "仅包含注释", False
 
-        # 检查是否是域名级别的规则
-        is_domain_level = self.is_domain_level_rule(rule)
+        # 🔄 修复：检查是否是特定路径规则
         has_specific_path = self._has_specific_path(rule)
-
-        # 🔄 根据配置处理特定路径规则
-        if has_specific_path and not is_domain_level:
-            specific_path_action = self.config["parsing"].get("specific_path_action", "low_priority")
-
-            if specific_path_action == "ignore":
-                # 原有行为：忽略特定路径规则
-                if self.config["parsing"]["ignore_specific_paths"]:
-                    return None, "指向特定路径"
 
         # 提取域名
         domain = self.extract_domain_from_rule(rule)
 
         if domain:
             cleaned_domain = self.clean_domain(domain)
-            return cleaned_domain, None if cleaned_domain else "无效域名"
+            if cleaned_domain:
+                return cleaned_domain, None, has_specific_path
+            else:
+                return None, "无效域名", has_specific_path
+        else:
+            # 🔄 对于无法提取域名的特定路径规则，也要标记为特定路径
+            if has_specific_path:
+                return None, "特定路径规则但无法提取域名", True
+            else:
+                return None, "无法解析规则格式", False
 
-        return None, "无法解析规则格式"
-
-    def fetch_domain_list(self, url: str, format_type: str = "domain", source_name: str = None, csv_config: Dict = None) -> Tuple[Set[str], Dict]:
+    def fetch_domain_list(self, url: str, format_type: str = "domain", source_name: str = None, csv_config: Dict = None) -> Tuple[Set[str], Set[str], Dict]:
         """
-        从URL获取域名列表，支持 CSV 格式
-        🔄 修改：支持特定路径规则的新处理方式
+        🔄 修复：从URL获取域名列表，正确处理特定路径规则
 
         Args:
             url: 域名列表URL
@@ -1384,14 +1279,15 @@ class SearXNGHostnamesGenerator:
             csv_config: CSV 配置（当 format_type 为 csv 时使用）
 
         Returns:
-            (域名集合, 统计信息)
+            (域名集合, 特定路径域名集合, 统计信息)
         """
         domains = set()
+        path_domains = set()
         stats = {
             'total_rules': 0,
             'parsed_domains': 0,
             'ignored_with_path': 0,
-            'path_to_low_priority': 0,  # 新增统计
+            'path_to_low_priority': 0,
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
@@ -1402,9 +1298,6 @@ class SearXNGHostnamesGenerator:
             'csv_invalid_urls': 0,
             'csv_extracted_domains': 0
         }
-
-        # 🔄 用于收集特定路径规则的域名
-        path_domains = set()
 
         retry_count = self.config["request_config"]["retry_count"]
         timeout = self.config["request_config"]["timeout"]
@@ -1425,7 +1318,7 @@ class SearXNGHostnamesGenerator:
                 if format_type == "csv":
                     if not csv_config:
                         print(f"  ❌ CSV 格式需要 csv_config 配置")
-                        return domains, stats
+                        return domains, path_domains, stats
 
                     return self._parse_csv_from_response(response.text, csv_config, source_name, stats)
 
@@ -1450,98 +1343,116 @@ class SearXNGHostnamesGenerator:
 
                     try:
                         if format_type == "ublock":
-                            # 使用 uBlock 语法解析
-                            domain, ignore_reason = self.parse_ublock_rule(line)
+                            # 🔄 修复：使用新的 parse_ublock_rule 方法
+                            domain, ignore_reason, is_path_rule = self.parse_ublock_rule(line)
+
+                            if domain:
+                                # 检查是否应该从数据源跳过此域名
+                                should_skip, skip_reason = self.should_skip_domain_from_source(domain, source_name)
+                                if should_skip:
+                                    stats['skipped_domains'] += 1
+                                    if len(skip_samples) < 3:
+                                        skip_samples.append(f"{line} -> {domain} ({skip_reason})")
+                                else:
+                                    # 🔄 修复：根据是否是特定路径规则来分类
+                                    if is_path_rule:
+                                        # 特定路径规则根据配置处理
+                                        specific_path_action = self.config["parsing"].get("specific_path_action", "low_priority")
+                                        if specific_path_action == "low_priority":
+                                            path_domains.add(domain)
+                                            stats['path_to_low_priority'] += 1
+                                            if len(path_to_low_priority_samples) < 3:
+                                                path_to_low_priority_samples.append(f"{line} -> {domain} (路径规则->低优先级)")
+                                        elif specific_path_action == "keep_action":
+                                            domains.add(domain)
+                                            stats['parsed_domains'] += 1
+                                        # ignore 情况下不添加到任何集合
+                                    else:
+                                        # 普通域名规则
+                                        if domain in domains:
+                                            stats['duplicate_domains'] += 1
+                                        else:
+                                            domains.add(domain)
+                                            stats['parsed_domains'] += 1
+                                            if len(accepted_samples) < 3:
+                                                accepted_samples.append(f"{line} -> {domain}")
+                            else:
+                                # 统计忽略原因
+                                if "特定路径" in (ignore_reason or ""):
+                                    stats['ignored_with_path'] += 1
+                                    if len(path_samples) < 3:
+                                        path_samples.append(line)
+                                elif ignore_reason in ["注释或空行", "仅包含注释"]:
+                                    stats['ignored_comments'] += 1
+                                    if len(comment_samples) < 3:
+                                        comment_samples.append(line)
+                                else:
+                                    stats['invalid_domains'] += 1
+                                    if len(ignored_samples) < 3:
+                                        ignored_samples.append(line)
+
                         elif format_type == "v2ray":
                             # 使用 v2ray 语法解析
                             domain, ignore_reason = self.parse_v2ray_rule(line)
-                            # 显示 v2ray 解析样本
                             if domain and len(accepted_samples) < 3:
                                 accepted_samples.append(f"v2ray: {line} -> {domain}")
                             elif ignore_reason and len(ignored_samples) < 3:
                                 ignored_samples.append(f"v2ray: {line} ({ignore_reason})")
+
+                            if domain:
+                                # 检查是否应该从数据源跳过此域名
+                                should_skip, skip_reason = self.should_skip_domain_from_source(domain, source_name)
+                                if should_skip:
+                                    stats['skipped_domains'] += 1
+                                    if len(skip_samples) < 3:
+                                        skip_samples.append(f"{line} -> {domain} ({skip_reason})")
+                                else:
+                                    if domain in domains:
+                                        stats['duplicate_domains'] += 1
+                                    else:
+                                        domains.add(domain)
+                                        stats['parsed_domains'] += 1
+                            else:
+                                # 统计忽略原因
+                                if ignore_reason in ["注释或空行", "仅包含注释"]:
+                                    stats['ignored_comments'] += 1
+                                    if len(comment_samples) < 3:
+                                        comment_samples.append(line)
+                                elif ignore_reason == "无效域名":
+                                    stats['invalid_domains'] += 1
+                                    if len(ignored_samples) < 3:
+                                        ignored_samples.append(line)
+
                         else:
                             # 普通域名格式 - 也需要处理行末注释
                             cleaned_line = line
                             if '#' in line:
                                 cleaned_line = line[:line.find('#')].strip()
                                 if not cleaned_line:
-                                    domain, ignore_reason = None, "仅包含注释"
-                                else:
-                                    # 🔄 检查特定路径规则
-                                    is_domain_level = self.is_domain_level_rule(cleaned_line)
-                                    has_specific_path = self._has_specific_path(cleaned_line)
+                                    stats['ignored_comments'] += 1
+                                    if len(comment_samples) < 3:
+                                        comment_samples.append(line)
+                                    continue
 
-                                    if has_specific_path and not is_domain_level:
-                                        specific_path_action = self.config["parsing"].get("specific_path_action", "low_priority")
-                                        if specific_path_action == "ignore" and self.config["parsing"]["ignore_specific_paths"]:
-                                            domain, ignore_reason = None, "指向特定路径"
-                                        else:
-                                            # 尝试提取域名
-                                            domain = self.clean_domain(self.extract_domain_from_rule(cleaned_line))
-                                            if domain and specific_path_action == "low_priority":
-                                                # 🔄 将特定路径规则的域名添加到 path_domains
-                                                path_domains.add(domain)
-                                                stats['path_to_low_priority'] += 1
-                                                if len(path_to_low_priority_samples) < 3:
-                                                    path_to_low_priority_samples.append(f"{line} -> {domain} (路径规则->低优先级)")
-                                            ignore_reason = None if domain else "无效域名"
+                            domain = self.clean_domain(self.extract_domain_from_rule(cleaned_line))
+                            if domain:
+                                # 检查是否应该从数据源跳过此域名
+                                should_skip, skip_reason = self.should_skip_domain_from_source(domain, source_name)
+                                if should_skip:
+                                    stats['skipped_domains'] += 1
+                                    if len(skip_samples) < 3:
+                                        skip_samples.append(f"{line} -> {domain} ({skip_reason})")
+                                else:
+                                    if domain in domains:
+                                        stats['duplicate_domains'] += 1
                                     else:
-                                        domain = self.clean_domain(self.extract_domain_from_rule(cleaned_line))
-                                        ignore_reason = None if domain else "无效域名"
+                                        domains.add(domain)
+                                        stats['parsed_domains'] += 1
+                                        if len(accepted_samples) < 3:
+                                            accepted_samples.append(f"{line} -> {domain}")
                             else:
-                                # 🔄 检查特定路径规则
-                                is_domain_level = self.is_domain_level_rule(cleaned_line)
-                                has_specific_path = self._has_specific_path(cleaned_line)
-
-                                if has_specific_path and not is_domain_level:
-                                    specific_path_action = self.config["parsing"].get("specific_path_action", "low_priority")
-                                    if specific_path_action == "ignore" and self.config["parsing"]["ignore_specific_paths"]:
-                                        domain, ignore_reason = None, "指向特定路径"
-                                    else:
-                                        # 尝试提取域名
-                                        domain = self.clean_domain(self.extract_domain_from_rule(cleaned_line))
-                                        if domain and specific_path_action == "low_priority":
-                                            # 🔄 将特定路径规则的域名添加到 path_domains
-                                            path_domains.add(domain)
-                                            stats['path_to_low_priority'] += 1
-                                            if len(path_to_low_priority_samples) < 3:
-                                                path_to_low_priority_samples.append(f"{line} -> {domain} (路径规则->低优先级)")
-                                        ignore_reason = None if domain else "无效域名"
-                                else:
-                                    domain = self.clean_domain(self.extract_domain_from_rule(cleaned_line))
-                                    ignore_reason = None if domain else "无效域名"
-
-                        if domain:
-                            # 检查是否应该从数据源跳过此域名
-                            should_skip, skip_reason = self.should_skip_domain_from_source(domain, source_name)
-                            if should_skip:
-                                stats['skipped_domains'] += 1
-                                if len(skip_samples) < 3:
-                                    skip_samples.append(f"{line} -> {domain} ({skip_reason})")
-                            else:
-                                if domain in domains:
-                                    stats['duplicate_domains'] += 1
-                                else:
-                                    domains.add(domain)
-                                    stats['parsed_domains'] += 1
-                                    # 记录一些被接受的规则样本（非 v2ray 格式的）
-                                    if format_type != "v2ray" and len(accepted_samples) < 3:
-                                        accepted_samples.append(f"{line} -> {domain}")
-                        else:
-                            # 统计忽略原因
-                            if ignore_reason == "指向特定路径":
-                                stats['ignored_with_path'] += 1
-                                # 记录一些被忽略的路径规则样本
-                                if len(path_samples) < 3:
-                                    path_samples.append(line)
-                            elif ignore_reason in ["注释或空行", "仅包含注释"]:
-                                stats['ignored_comments'] += 1
-                                if len(comment_samples) < 3:
-                                    comment_samples.append(line)
-                            elif ignore_reason == "无效域名":
                                 stats['invalid_domains'] += 1
-                                if format_type != "v2ray" and len(ignored_samples) < 3:
+                                if len(ignored_samples) < 3:
                                     ignored_samples.append(line)
 
                     except Exception as e:
@@ -1596,7 +1507,6 @@ class SearXNGHostnamesGenerator:
                     for sample in ignored_samples:
                         print(f"    ✗ {sample}")
 
-                # 🔄 返回结果中包含特定路径域名的信息
                 return domains, path_domains, stats
 
             except requests.RequestException as e:
@@ -1611,7 +1521,6 @@ class SearXNGHostnamesGenerator:
     def _parse_csv_from_response(self, csv_content: str, csv_config: Dict, source_name: str, stats: Dict) -> Tuple[Set[str], Set[str], Dict]:
         """
         从 HTTP 响应内容解析 CSV 格式的域名
-        🔄 修改：返回格式增加特定路径域名集合
 
         Args:
             csv_content: CSV 内容字符串
@@ -2396,7 +2305,7 @@ class SearXNGHostnamesGenerator:
     def collect_domains(self) -> Dict[str, Set[str]]:
         """
         从所有配置的源收集域名
-        🔄 修改：支持特定路径规则处理
+        🔄 修复：正确处理特定路径规则
 
         Returns:
             按动作分类的域名集合
@@ -2412,7 +2321,7 @@ class SearXNGHostnamesGenerator:
             'total_rules': 0,
             'parsed_domains': 0,
             'ignored_with_path': 0,
-            'path_to_low_priority': 0,  # 新增统计
+            'path_to_low_priority': 0,  # 特定路径转低优先级数量
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
@@ -2437,7 +2346,7 @@ class SearXNGHostnamesGenerator:
             csv_config = source.get("csv_config") if format_type == "csv" else None
             print(f"格式类型: {format_type}")
 
-            # 🔄 修改：获取特定路径域名
+            # 🔄 修复：获取特定路径域名
             domains, path_domains, source_stats = self.fetch_domain_list(source["url"], format_type, source["name"], csv_config)
 
             # 累加统计信息
@@ -2464,36 +2373,29 @@ class SearXNGHostnamesGenerator:
                     if source_action in categorized_domains:
                         categorized_domains[source_action].add(domain)
 
-            # 🔄 处理特定路径域名 - 根据配置决定处理方式
+            # 🔄 修复：处理特定路径域名
             if path_domains:
                 specific_path_action = self.config["parsing"].get("specific_path_action", "low_priority")
+                path_auto_classified_count = 0
 
-                if specific_path_action == "low_priority":
-                    # 将特定路径域名添加到低优先级
-                    for domain in path_domains:
-                        # 检查自动分类规则
-                        auto_action, reason = self.get_auto_classify_action(domain)
-                        if auto_action:
-                            categorized_domains[auto_action].add(domain)
-                            auto_classified_count += 1
-                        else:
+                for domain in path_domains:
+                    # 检查自动分类规则
+                    auto_action, reason = self.get_auto_classify_action(domain)
+                    if auto_action:
+                        categorized_domains[auto_action].add(domain)
+                        path_auto_classified_count += 1
+                        if path_auto_classified_count <= 3:
+                            print(f"  🔄 特定路径域名自动分类: {domain} -> {auto_action} ({reason})")
+                    else:
+                        if specific_path_action == "low_priority":
                             categorized_domains['low_priority'].add(domain)
-
-                    print(f"  📍 特定路径规则处理: {len(path_domains)} 个域名添加到低优先级类别")
-                elif specific_path_action == "keep_action":
-                    # 将特定路径域名保持原有动作但降级处理
-                    for domain in path_domains:
-                        # 检查自动分类规则
-                        auto_action, reason = self.get_auto_classify_action(domain)
-                        if auto_action:
-                            categorized_domains[auto_action].add(domain)
-                            auto_classified_count += 1
-                        else:
-                            # 保持原有动作，但可以考虑优先级调整
+                        elif specific_path_action == "keep_action":
+                            # 保持原有动作
                             if source_action in categorized_domains:
                                 categorized_domains[source_action].add(domain)
 
-                    print(f"  📍 特定路径规则处理: {len(path_domains)} 个域名保持 {source_action} 动作")
+                auto_classified_count += path_auto_classified_count
+                print(f"  📍 特定路径规则处理: {len(path_domains)} 个域名 (自动分类: {path_auto_classified_count})")
 
             if auto_classified_count > 0:
                 print(f"  ✅ 自动分类处理: {auto_classified_count} 个域名")
@@ -2548,7 +2450,7 @@ class SearXNGHostnamesGenerator:
 
                 print(f"  ✅ 从文件加载了 {len(domains) + len(replace_rules)} 个规则到 {action} 类别")
 
-        # 🔥 新增功能：主动应用自动分类规则中的域名
+        # 🔥 应用自动分类规则中的域名
         self.apply_auto_classify_rules_directly(categorized_domains)
 
         return categorized_domains
@@ -2597,41 +2499,6 @@ class SearXNGHostnamesGenerator:
         print(f"   - 严格域名级别检查: {parsing_config.get('strict_domain_level_check', True)}")
         print(f"   - 保持原始结构: {parsing_config.get('preserve_original_structure', True)}")
         print(f"   - 保持 www. 前缀: {parsing_config.get('preserve_www_prefix', True)}")
-
-        # 🔄 显示特定路径处理说明
-        specific_path_action = parsing_config.get('specific_path_action', 'low_priority')
-        if specific_path_action == 'ignore':
-            print("   - 🔄 特定路径规则将被完全忽略")
-        elif specific_path_action == 'low_priority':
-            print("   - 🔄 特定路径规则将被设置为低优先级")
-        elif specific_path_action == 'keep_action':
-            print("   - 🔄 特定路径规则将保持原有动作分类")
-
-        # 显示自动分类配置
-        auto_classify_config = self.config.get("auto_classify", {})
-        if auto_classify_config.get("enabled", False):
-            print(f"🔄 自动分类配置:")
-            print(f"   - 内置规则: {len(auto_classify_config.get('rules', []))} 个")
-            print(f"   - 外部源: {len([s for s in auto_classify_config.get('sources', []) if s.get('enabled', True)])} 个")
-            print(f"   - 总计规则: {len(self.auto_classify_rules)} 个")
-        else:
-            print(f"🔄 自动分类功能已禁用")
-
-        # 显示自定义规则配置
-        custom_rules_config = self.config.get("custom_rules", {})
-        if custom_rules_config.get("enabled", False):
-            enabled_sources = [s for s in custom_rules_config.get("sources", []) if s.get("enabled", True)]
-            print(f"📁 自定义规则文件:")
-            print(f"   - 启用的文件源: {len(enabled_sources)} 个")
-            for source in enabled_sources:
-                format_info = f" - 格式: {source.get('format', 'domain')}"
-                if source.get('format') == 'csv':
-                    csv_config = source.get('csv_config', {})
-                    column_info = csv_config.get('column', f"索引{csv_config.get('column_index', '未指定')}")
-                    format_info += f" (列: {column_info})"
-                print(f"     • {source['name']}: {source['file']} ({source.get('action', 'remove')}){format_info}")
-        else:
-            print(f"📁 自定义规则文件功能已禁用")
 
         # 收集域名
         categorized_domains = self.collect_domains()
@@ -2737,7 +2604,7 @@ class SearXNGHostnamesGenerator:
 
     def save_separate_files(self, rules: Dict[str, any]) -> None:
         """
-        保存为分离的文件 - 简化版文件头
+        保存为分离的文件
 
         Args:
             rules: 规则字典
@@ -2806,7 +2673,7 @@ class SearXNGHostnamesGenerator:
 
     def save_single_file(self, rules: Dict[str, any]) -> None:
         """
-        保存为单个文件 - 简化版文件头
+        保存为单个文件
 
         Args:
             rules: 规则字典
@@ -2849,13 +2716,10 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray 格式 - 保持原始结构 + CSV 支持)")
-        print("🔧 修复版本：skip 规则只影响数据源处理，不阻止明确的自动分类规则")
-        print("🆕 新增功能：支持 v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)")
-        print("🔧 修正功能：保持原始域名结构，不移除 www. 等前缀")
-        print("🆕 CSV 支持：可从 CSV 文件指定列读取 Hostname URL 并自动提取域名")
-        print("🔄 优化功能：特定路径规则设置为低优先级，而不是直接忽略")
-        print("=" * 110)
+        print("SearXNG Hostnames 规则生成器启动 - 精简版")
+        print("🔄 修复：特定路径规则正确识别并设置为低优先级")
+        print("🔧 精简：移除无用代码，优化性能")
+        print("=" * 60)
 
         try:
             # 生成规则
@@ -2881,7 +2745,6 @@ class SearXNGHostnamesGenerator:
     def print_statistics(self, rules: Dict[str, any]) -> None:
         """
         输出统计信息
-        🔄 修改：包含特定路径处理统计
 
         Args:
             rules: 生成的规则
@@ -2906,13 +2769,6 @@ class SearXNGHostnamesGenerator:
                 total_rules += rule_count
                 total_domains += domain_count
 
-                # 如果是单行正则模式，显示规则长度信息
-                if (self.force_single_regex or self.config["optimization"].get("force_single_regex", False)) and rule_data:
-                    for i, rule in enumerate(rule_data, 1):
-                        rule_length = len(rule)
-                        if rule_length > 1000:
-                            print(f"    规则 {i} 长度: {rule_length:,} 字符")
-
         print(f"\n📈 总计: {total_rules} 条规则 (包含 {total_domains} 个域名)")
 
         print(f"\n🔍 解析统计:")
@@ -2923,102 +2779,35 @@ class SearXNGHostnamesGenerator:
         print(f"  - 忽略(注释): {self.stats['ignored_comments']:,}")
         print(f"  - 忽略(无效域名): {self.stats['invalid_domains']:,}")
         print(f"  - 重复域名: {self.stats['duplicate_domains']:,}")
-        print(f"  - 自动分类处理: {self.stats.get('auto_classified', 0):,}")
-        print(f"  - 🆕 主动添加域名: {self.stats.get('auto_added', 0):,}")
-        print(f"  - 🔄 从数据源跳过: {self.stats.get('skipped_from_sources', 0):,}")
-        print(f"  - 🔄 skip 规则被覆盖: {self.stats.get('skip_overridden', 0):,}")
+
+        if self.stats.get('auto_classified', 0) > 0:
+            print(f"  - 自动分类处理: {self.stats.get('auto_classified', 0):,}")
+        if self.stats.get('auto_added', 0) > 0:
+            print(f"  - 主动添加域名: {self.stats.get('auto_added', 0):,}")
+        if self.stats.get('skipped_from_sources', 0) > 0:
+            print(f"  - 从数据源跳过: {self.stats.get('skipped_from_sources', 0):,}")
         if self.stats.get('v2ray_with_tags', 0) > 0:
-            print(f"  - 📝 v2ray 带标签规则: {self.stats.get('v2ray_with_tags', 0):,}")
-        if self.stats.get('csv_parsed_rows', 0) > 0:
-            print(f"  - 📊 CSV 解析行数: {self.stats.get('csv_parsed_rows', 0):,}")
-            print(f"  - 📊 CSV 提取域名: {self.stats.get('csv_extracted_domains', 0):,}")
-            print(f"  - 📊 CSV 无效 URL: {self.stats.get('csv_invalid_urls', 0):,}")
+            print(f"  - v2ray 带标签规则: {self.stats.get('v2ray_with_tags', 0):,}")
+        if self.stats.get('csv_extracted_domains', 0) > 0:
+            print(f"  - CSV 提取域名: {self.stats.get('csv_extracted_domains', 0):,}")
 
         print(f"\n📁 输出目录: {self.config['output']['directory']}")
 
-        print(f"\n📡 数据源:")
-        for source in self.config["sources"]:
-            if source.get("enabled", True):
-                format_info = f"({source.get('format', 'domain')})"
-                if source.get('format') == 'csv':
-                    csv_config = source.get('csv_config', {})
-                    column_info = csv_config.get('column', f"索引{csv_config.get('column_index', '?')}")
-                    format_info = f"(csv: {column_info})"
-                print(f"  ✅ {source['name']} {format_info}")
-            else:
-                print(f"  ❌ {source['name']} (已禁用)")
-
-        print(f"\n⚙️  配置:")
-        print(f"  - 忽略特定路径规则: {self.config['parsing']['ignore_specific_paths']}")
-        print(f"  - 🔄 特定路径规则处理: {self.config['parsing'].get('specific_path_action', 'low_priority')}")
-        print(f"  - 严格域名级别检查: {self.config['parsing'].get('strict_domain_level_check', True)}")
-        print(f"  - 忽略IP地址: {self.config['parsing']['ignore_ip']}")
-        print(f"  - 忽略localhost: {self.config['parsing']['ignore_localhost']}")
-        print(f"  - 保持原始结构: {self.config['parsing'].get('preserve_original_structure', True)}")
-        print(f"  - 保持 www. 前缀: {self.config['parsing'].get('preserve_www_prefix', True)}")
-
-        # 🔄 特定路径处理配置说明
+        print(f"\n🔄 特定路径规则处理:")
         specific_path_action = self.config['parsing'].get('specific_path_action', 'low_priority')
-        print(f"\n🔄 特定路径规则处理配置:")
-        if specific_path_action == 'ignore':
-            print(f"  - 模式: 完全忽略特定路径规则")
-            print(f"  - 效果: 这些规则不会被处理")
-        elif specific_path_action == 'low_priority':
-            print(f"  - 模式: 特定路径规则设置为低优先级")
-            print(f"  - 效果: 包含具体路径的规则会被提取域名并设置为低优先级")
-            print(f"  - 处理数量: {self.stats.get('path_to_low_priority', 0):,} 个规则")
+        print(f"  - 处理模式: {specific_path_action}")
+        if specific_path_action == 'low_priority':
+            print(f"  - 转为低优先级的数量: {self.stats.get('path_to_low_priority', 0):,}")
+            print(f"  - 效果: 特定路径规则的域名被设置为低优先级，保持可搜索性")
+        elif specific_path_action == 'ignore':
+            print(f"  - 效果: 特定路径规则被完全忽略")
         elif specific_path_action == 'keep_action':
-            print(f"  - 模式: 保持特定路径规则的原有动作")
-            print(f"  - 效果: 这些规则保持数据源指定的动作分类")
+            print(f"  - 效果: 特定路径规则保持原有动作分类")
 
-        # 自动分类配置
-        auto_classify_config = self.config.get("auto_classify", {})
-        print(f"\n🔄 自动分类配置:")
-        if auto_classify_config.get("enabled", False):
-            print(f"  - 状态: 已启用")
-            print(f"  - 内置规则: {len(auto_classify_config.get('rules', []))} 个")
-            print(f"  - 外部源: {len([s for s in auto_classify_config.get('sources', []) if s.get('enabled', True)])} 个")
-            print(f"  - 总计规则: {len(self.auto_classify_rules)} 个")
-            print(f"  - 重新分类域名: {self.stats.get('auto_classified', 0):,} 个")
-            print(f"  - 🆕 主动添加域名: {self.stats.get('auto_added', 0):,} 个")
-            print(f"  - 🔄 从数据源跳过: {self.stats.get('skipped_from_sources', 0):,} 个")
-            print(f"  - 🔄 skip 规则覆盖: {self.stats.get('skip_overridden', 0):,} 个")
-        else:
-            print(f"  - 状态: 已禁用")
-
-        # 自定义规则配置
-        custom_rules_config = self.config.get("custom_rules", {})
-        print(f"\n📁 自定义规则文件:")
-        if custom_rules_config.get("enabled", False):
-            print(f"  - 状态: 已启用")
-            enabled_sources = [s for s in custom_rules_config.get("sources", []) if s.get("enabled", True)]
-            print(f"  - 启用的文件源: {len(enabled_sources)} 个")
-            for source in enabled_sources:
-                file_exists = "✅" if os.path.exists(source['file']) else "❌"
-                format_info = f" - 格式: {source.get('format', 'domain')}"
-                if source.get('format') == 'csv':
-                    csv_config = source.get('csv_config', {})
-                    column_info = csv_config.get('column', f"索引{csv_config.get('column_index', '?')}")
-                    format_info += f" (列: {column_info})"
-                print(f"    {file_exists} {source['name']}: {source['file']} ({source.get('action', 'remove')}){format_info}")
-        else:
-            print(f"  - 状态: 已禁用")
-
-        # 性能优化配置
-        opt_config = self.config["optimization"]
-        print(f"\n🚀 性能优化:")
-        print(f"  - 启用域名合并: {opt_config.get('merge_domains', True)}")
-        print(f"  - 智能域名排序: {opt_config.get('sort_before_merge', True)}")
-        print(f"  - 高级TLD优化: {opt_config.get('enable_advanced_tld_merge', True)}")
-        print(f"  - 强制单行正则: {self.force_single_regex or opt_config.get('force_single_regex', False)}")
-
-        if not (self.force_single_regex or opt_config.get('force_single_regex', False)):
-            print(f"  - 每规则最大域名数: {opt_config.get('max_domains_per_rule', 30)}")
-            print(f"  - 按TLD分组: {opt_config.get('group_by_tld', True)}")
-            print(f"  - 最大规则长度: {opt_config.get('max_rule_length', 4000):,}")
-
-        print(f"  - 前缀优化: {opt_config.get('enable_prefix_optimization', True)}")
-        print(f"  - 后缀优化: {opt_config.get('enable_suffix_optimization', True)}")
+        print(f"\n✨ 优化效果:")
+        if total_domains > 0 and total_rules > 0:
+            compression_ratio = (total_rules / total_domains) * 100
+            print(f"  - 压缩比率: {compression_ratio:.1f}% ({total_domains:,} 个域名 -> {total_rules} 条规则)")
 
         print(f"\n💡 使用方法:")
         if self.config["output"]["mode"] == "separate_files":
@@ -3030,480 +2819,13 @@ class SearXNGHostnamesGenerator:
         else:
             print("将生成的 hostnames.yml 内容复制到 SearXNG settings.yml 中")
 
-        print(f"\n✨ 优化效果:")
-        if total_domains > 0 and total_rules > 0:
-            compression_ratio = (total_rules / total_domains) * 100
-            print(f"  - 压缩比率: {compression_ratio:.1f}% ({total_domains:,} 个域名 -> {total_rules} 条规则)")
-            if compression_ratio < 10:
-                print("  - 🎉 压缩效果极佳！大量域名被合并优化")
-            elif compression_ratio < 50:
-                print("  - 👍 压缩效果良好")
-            else:
-                print("  - 📝 规则较多，可考虑启用单行正则模式")
-
-        # 显示各类别的压缩情况
-        print(f"\n📈 各类别压缩详情:")
-        for rule_type in ["replace", "remove", "low_priority", "high_priority"]:
-            if rule_type in rules:
-                rule_data = rules[rule_type]
-                rule_count = len(rule_data) if isinstance(rule_data, (list, dict)) else 0
-                domain_count = self.category_domain_counts.get(rule_type, 0)
-                if domain_count > 0 and rule_count > 0:
-                    category_ratio = (rule_count / domain_count) * 100
-                    print(f"  - {rule_type}: {category_ratio:.1f}% ({domain_count} 个域名 -> {rule_count} 条规则)")
-                elif domain_count == 0 and rule_count == 0:
-                    print(f"  - {rule_type}: 空 (0 个域名 -> 0 条规则)")
-                else:
-                    print(f"  - {rule_type}: {domain_count} 个域名 -> {rule_count} 条规则")
-
-        print(f"\n🆕 v2ray 格式支持:")
-        print(f"  - domain:example.com         # 匹配域名及其所有子域名")
-        print(f"  - full:example.com           # 完全匹配指定域名")
-        print(f"  - domain:example.com:@tag    # 带标签的域名规则")
-        print(f"  - 标签信息会被记录但不影响域名匹配")
-        print(f"  - 只有明确的端口号(纯数字)才会被移除")
-        if self.stats.get('v2ray_with_tags', 0) > 0:
-            print(f"  - 本次处理了 {self.stats.get('v2ray_with_tags', 0)} 个带标签的 v2ray 规则")
-
-        print(f"\n🔧 原始结构保持:")
-        print(f"  - 保持 www.example.com 的 www. 前缀")
-        print(f"  - 保持子域名的完整结构")
-        print(f"  - 只移除明确的协议和端口信息")
-        print(f"  - v2ray 格式域名完全保持原始结构")
-
-        print(f"\n🆕 CSV 格式支持:")
-        print(f"  - 可从 CSV 文件的指定列读取 URL")
-        print(f"  - 自动从 URL 中提取域名(hostname)")
-        print(f"  - 支持按列名或列索引指定目标列")
-        print(f"  - 支持自定义分隔符和编码")
-        if self.stats.get('csv_extracted_domains', 0) > 0:
-            print(f"  - 本次从 CSV 成功提取了 {self.stats.get('csv_extracted_domains', 0)} 个域名")
-
-        print(f"\n🔄 特定路径规则处理:")
-        print(f"  - ignore: 完全忽略特定路径规则（原有行为）")
-        print(f"  - low_priority: 将特定路径规则的域名设置为低优先级（推荐）")
-        print(f"  - keep_action: 保持特定路径规则的原有动作分类")
-        print(f"  - 🔧 当前配置: {self.config['parsing'].get('specific_path_action', 'low_priority')}")
-        if self.stats.get('path_to_low_priority', 0) > 0:
-            print(f"  - 📍 本次处理了 {self.stats.get('path_to_low_priority', 0)} 个特定路径规则为低优先级")
-
-        print(f"\n📁 支持的文件格式:")
-        print(f"  - domain: 纯域名格式 (每行一个域名)")
-        print(f"  - regex: 正则表达式格式 (直接使用的正则)")
-        print(f"  - ublock: uBlock Origin 格式")
-        print(f"  - v2ray: v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)")
-        print(f"  - replace: 替换格式 (old_domain=new_domain)")
-        print(f"  - classify: 自动分类格式 (action:domain)")
-        print(f"  - 🆕 csv: CSV 格式 (从指定列提取 URL 并转换为域名)")
-
-        print(f"\n🔧 CSV 格式配置示例:")
-        print(f"  csv_config:")
-        print(f"    column: 'Address'           # 使用列名")
-        print(f"    # column_index: 1           # 或使用列索引")
-        print(f"    has_header: true            # 是否有标题行")
-        print(f"    delimiter: ','              # CSV 分隔符")
-        print(f"    encoding: 'utf-8'           # 文件编码")
-
-        print(f"\n🔧 自动分类语法示例:")
-        print(f"  - skip:csdn.net              # 从数据源跳过（但不阻止其他规则）")
-        print(f"  - low_priority:csdn.net      # 添加到低优先级（会覆盖 skip）")
-        print(f"  - remove:baidu.com           # 将 baidu.com 添加到移除列表")
-        print(f"  - high_priority:wikipedia.org # 将 wikipedia.org 添加到高优先级列表")
-        print(f"  - replace:youtube.com=yt.example.com # 替换规则")
-
-        print(f"\n🔧 修复后的 Skip 规则行为:")
-        print(f"  - skip:csdn.net - 只会从数据源的默认处理中跳过 csdn.net")
-        print(f"  - low_priority:csdn.net - 会主动将 csdn.net 添加到低优先级列表")
-        print(f"  - 如果同时存在，low_priority 规则会生效，skip 被覆盖")
-
-        if self.stats.get('skip_overridden', 0) > 0:
-            print(f"\n🔄 Skip 规则覆盖详情:")
-            print(f"  - 有 {self.stats.get('skip_overridden', 0)} 个域名的 skip 规则被其他自动分类规则覆盖")
-            print(f"  - 这意味着这些域名不会从数据源跳过，但会被添加到指定类别")
-            print(f"  - 这正是期望的行为：明确的分类规则优先级高于 skip 规则")
-
-        print(f"\n🔄 特定路径规则处理优势:")
-        print(f"  - 👍 避免了完全忽略可能有价值的域名")
-        print(f"  - 👍 特定路径的内容通常质量较低，设置为低优先级更合适")
-        print(f"  - 👍 用户仍然可以通过自动分类规则进行精确控制")
-        print(f"  - 👍 保持了对所有类型内容的可搜索性")
-
-
-def create_sample_config():
-    """
-    创建示例配置文件 (支持 v2ray 格式，保持原始结构，新增 CSV 支持，特定路径低优先级版本)
-    """
-    sample_config = {
-        "sources": [
-            {
-                "name": "Google Chinese Results Blocklist",
-                "url": "https://raw.githubusercontent.com/cobaltdisco/Google-Chinese-Results-Blocklist/refs/heads/master/GHHbD_perma_ban_list.txt",
-                "action": "remove",
-                "format": "domain",
-                "enabled": True
-            },
-            {
-                "name": "Chinese Internet is Dead",
-                "url": "https://raw.githubusercontent.com/obgnail/chinese-internet-is-dead/master/blocklist.txt",
-                "action": "remove",
-                "format": "ublock",
-                "enabled": True
-            },
-            {
-                "name": "Luxirty Search Block List",
-                "url": "https://raw.githubusercontent.com/KoriIku/luxirty-search/refs/heads/main/docs/block_list.txt",
-                "action": "remove",
-                "format": "domain",
-                "enabled": True
-            },
-            {
-                "name": "Example v2ray Rules",
-                "url": "https://example.com/v2ray-rules.txt",
-                "action": "remove",
-                "format": "v2ray",
-                "enabled": False
-            },
-            {
-                "name": "Example CSV from URL",
-                "url": "https://example.com/blog_list.csv",
-                "action": "remove",
-                "format": "csv",
-                "csv_config": {
-                    "column": "Address",
-                    "has_header": True,
-                    "delimiter": ",",
-                    "encoding": "utf-8"
-                },
-                "enabled": False
-            }
-        ],
-
-        "custom_rules": {
-            "enabled": True,
-            "sources": [
-                {
-                    "name": "Custom Remove Rules",
-                    "file": "./custom_remove.txt",
-                    "action": "remove",
-                    "format": "domain",
-                    "enabled": False
-                },
-                {
-                    "name": "Custom Low Priority Rules",
-                    "file": "./custom_low_priority.txt",
-                    "action": "low_priority",
-                    "format": "domain",
-                    "enabled": False
-                },
-                {
-                    "name": "Custom High Priority Rules",
-                    "file": "./custom_high_priority.txt",
-                    "action": "high_priority",
-                    "format": "domain",
-                    "enabled": False
-                },
-                {
-                    "name": "Custom Replace Rules",
-                    "file": "./custom_replace.txt",
-                    "action": "replace",
-                    "format": "replace",
-                    "enabled": False
-                },
-                {
-                    "name": "Custom v2ray Rules",
-                    "file": "./custom_v2ray.txt",
-                    "action": "remove",
-                    "format": "v2ray",
-                    "enabled": False
-                },
-                {
-                    "name": "Custom CSV Rules",
-                    "file": "./blog_list.csv",
-                    "action": "remove",
-                    "format": "csv",
-                    "csv_config": {
-                        "column": "Address",
-                        "has_header": True,
-                        "delimiter": ",",
-                        "encoding": "utf-8"
-                    },
-                    "enabled": False
-                }
-            ]
-        },
-
-        "auto_classify": {
-            "enabled": True,
-            "sources": [
-                {
-                    "name": "Auto Classify Rules",
-                    "file": "./auto_classify.txt",
-                    "format": "classify",
-                    "enabled": True
-                }
-            ],
-            "rules": [
-                "remove:example.com",
-                "low_priority:google.com",
-                "high_priority:wikipedia.org",
-                "replace:youtube.com=yt.example.com",
-                "skip:github.com"
-            ]
-        },
-
-        "replace_rules": {
-            '(.*\.)?youtube\.com$': 'yt.example.com',
-            '(.*\.)?youtu\.be$': 'yt.example.com',
-            '(.*\.)?reddit\.com$': 'teddit.example.com'
-        },
-
-        "fixed_remove": [
-            '(.*\.)?facebook.com$'
-        ],
-
-        "fixed_low_priority": [
-            '(.*\.)?google(\..*)?$'
-        ],
-
-        "fixed_high_priority": [
-            '(.*\.)?wikipedia.org$'
-        ],
-
-        "parsing": {
-            "ignore_specific_paths": False,     # 🔄 修改：默认不忽略特定路径规则
-            "specific_path_action": "low_priority",  # 🆕 新增：特定路径规则处理方式
-            "ignore_ip": True,
-            "ignore_localhost": True,
-            "strict_domain_level_check": True,
-            "preserve_www_prefix": True,  # 保持 www. 前缀
-            "preserve_original_structure": True  # 保持原始域名结构
-        },
-
-        "optimization": {
-            "merge_domains": True,
-            "max_domains_per_rule": 256,
-            "group_by_tld": True,
-            "use_trie_optimization": True,
-            "max_rule_length": 65536,
-            "optimize_tld_grouping": True,
-            "enable_prefix_optimization": True,
-            "enable_suffix_optimization": True,
-            "min_common_prefix_length": 3,
-            "min_common_suffix_length": 3,
-            "force_single_regex": False,
-            "sort_before_merge": True,
-            "enable_advanced_tld_merge": True
-        },
-
-        "request_config": {
-            "timeout": 30,
-            "retry_count": 3,
-            "retry_delay": 1
-        },
-
-        "output": {
-            "mode": "separate_files",
-            "directory": "./rules/",
-            "files": {
-                "replace": "rewrite-hosts.yml",
-                "remove": "remove-hosts.yml",
-                "low_priority": "low-priority-hosts.yml",
-                "high_priority": "high-priority-hosts.yml",
-                "main_config": "hostnames-config.yml"
-            }
-        }
-    }
-
-    with open("config.yaml", "w", encoding="utf-8") as f:
-        yaml.dump(sample_config, f, default_flow_style=False, allow_unicode=True, indent=2)
-
-    # 创建示例自动分类文件
-    with open("auto_classify.txt", "w", encoding="utf-8") as f:
-        f.write("""# 自动分类规则示例文件
-# 语法：action:domain
-# 支持的 action：remove, low_priority, high_priority, replace, skip
-
-# 移除规则 - 将域名添加到移除列表
-remove:baidu.com
-remove:*.csdn.net
-remove:zhihu.com
-
-# 低优先级规则
-low_priority:google.com
-low_priority:*.google.com
-
-# 高优先级规则
-high_priority:wikipedia.org
-high_priority:*.wikipedia.org
-high_priority:www.wikipedia.org  # 会保持 www. 前缀
-
-# 替换规则 - 格式：replace:old_domain=new_domain
-replace:youtube.com=yt.example.com
-replace:www.youtube.com=yt.example.com  # www 前缀会被保留在匹配中
-replace:twitter.com=nitter.example.com
-
-# 跳过规则 - 只跳过数据源处理，不阻止明确的自动分类规则
-skip:github.com
-skip:*.github.com
-skip:stackoverflow.com
-
-# 示例：同时有 skip 和 low_priority 规则
-# skip 规则会被 low_priority 覆盖，域名会被添加到低优先级列表
-skip:csdn.net
-low_priority:csdn.net
-""")
-
-    # 创建示例自定义规则文件
-    with open("custom_remove.txt", "w", encoding="utf-8") as f:
-        f.write("""# 自定义移除规则示例
-# 每行一个域名，支持注释
-
-example1.com  # 示例域名1
-example2.com  # 示例域名2
-www.example3.com  # www 前缀会被保持
-*.example4.com  # 示例通配符域名
-""")
-
-    with open("custom_replace.txt", "w", encoding="utf-8") as f:
-        f.write("""# 自定义替换规则示例
-# 格式：old_domain=new_domain
-
-old.example.com=new.example.com
-www.old.example.com=new.example.com
-another.old.com=another.new.com
-""")
-
-    # 创建示例 v2ray 规则文件
-    with open("custom_v2ray.txt", "w", encoding="utf-8") as f:
-        f.write("""# v2ray 格式规则示例文件
-# 支持的格式：
-# domain:example.com     - 匹配域名及其所有子域名
-# full:example.com       - 完全匹配指定域名
-# domain:example.com:@tag - 带标签的域名规则
-
-# 域名级别匹配（包括子域名）
-domain:scopus.com
-domain:researchgate.net
-domain:academia.edu
-domain:www.researchkit.cn  # www 前缀会被保持
-
-# 完全匹配
-full:scholar.google.ae
-full:scholar.google.com.hk
-full:pubmed.ncbi.nlm.nih.gov
-full:www.scholar.google.com  # www 前缀会被保持
-
-# 内容农场域名
-domain:csdn.net
-domain:jianshu.com
-domain:zhihu.com
-domain:www.cnblogs.com  # www 前缀会被保持
-
-# 带标签的规则示例
-domain:researchkit.cn:@cn  # 带地区标签
-full:www.example.com:@test:@demo  # 多个标签
-domain:academic.example.com:@academic:@high_priority  # 复合标签
-
-# 注释示例
-# domain:example.com  # 这是注释
-""")
-
-    # 🆕 创建示例 CSV 文件
-    with open("blog_list.csv", "w", encoding="utf-8") as f:
-        f.write("""Introduction,Address,RSS feed,tags
-透明创业实验,https://blog.t9t.io,https://blog.t9t.io/atom.xml,创业; 编程; 开源
-阮一峰的网络日志,https://www.ruanyifeng.com/blog/,https://www.ruanyifeng.com/blog/atom.xml,技术; 编程
-酷壳 – CoolShell,https://coolshell.cn,https://coolshell.cn/feed,技术; 编程
-V2EX,https://www.v2ex.com,https://www.v2ex.com/index.xml,社区; 技术
-少数派,https://sspai.com,https://sspai.com/feed,效率; 工具
-小众软件,https://www.appinn.com,https://www.appinn.com/feed/,软件; 工具
-异次元软件世界,https://www.iplaysoft.com,https://www.iplaysoft.com/feed,软件; 工具
-知乎日报,https://daily.zhihu.com,https://daily.zhihu.com/rss,新闻; 知识
-""")
-
-    print("示例配置文件已创建: config.yaml")
-    print("示例自动分类文件已创建: auto_classify.txt")
-    print("示例自定义规则文件已创建: custom_remove.txt, custom_replace.txt")
-    print("🆕 示例 v2ray 规则文件已创建: custom_v2ray.txt")
-    print("🆕 示例 CSV 文件已创建: blog_list.csv")
-
-    print("\n🔄 新增功能：特定路径规则处理配置")
-    print("  parsing:")
-    print("    ignore_specific_paths: false        # 不再默认忽略特定路径规则")
-    print("    specific_path_action: 'low_priority'  # 特定路径规则处理方式")
-    print("")
-    print("🔧 specific_path_action 可选值:")
-    print("  - ignore: 完全忽略特定路径规则（原有行为）")
-    print("  - low_priority: 将特定路径规则的域名设置为低优先级（推荐）")
-    print("  - keep_action: 保持特定路径规则的原有动作分类")
-
-    print("\n🔄 特定路径规则处理优势:")
-    print("  - 👍 避免了完全忽略可能有价值的域名")
-    print("  - 👍 特定路径的内容通常质量较低，设置为低优先级更合适")
-    print("  - 👍 用户仍然可以通过自动分类规则进行精确控制")
-    print("  - 👍 保持了对所有类型内容的可搜索性")
-
-    print("\n🆕 v2ray 格式说明:")
-    print("  - domain:example.com         # 匹配域名及其所有子域名")
-    print("  - full:example.com           # 完全匹配指定域名")
-    print("  - domain:example.com:@tag    # 带标签的域名规则")
-    print("  - 标签信息会被显示但不影响域名处理")
-    print("  - 域名的原始结构(包括www前缀)完全保持")
-
-    print("\n🔧 原始结构保持说明:")
-    print("  - www.example.com 会保持 www. 前缀")
-    print("  - sub.example.com 会保持完整的子域名结构")
-    print("  - 只有明确的协议(http://)和端口号(:8080)才会被移除")
-    print("  - v2ray 格式中的标签(:@tag)会被识别但不影响域名本身")
-
-    print("\n🆕 CSV 格式支持说明:")
-    print("  - 可从 CSV 文件指定列读取 URL")
-    print("  - 自动从 URL 提取域名(hostname)")
-    print("  - blog_list.csv 示例文件包含了多个博客 URL")
-    print("  - 配置中指定 'Address' 列作为 URL 源")
-    print("  - 支持有/无标题行、自定义分隔符等配置")
-
-    print("\n🔧 CSV 配置选项:")
-    print("  - column: 'Address'           # 使用列名(需要标题行)")
-    print("  - column_index: 1             # 使用列索引(从0开始)")
-    print("  - has_header: true            # 是否有标题行")
-    print("  - delimiter: ','              # CSV 分隔符")
-    print("  - encoding: 'utf-8'           # 文件编码")
-
-    print("\n🔄 修复后的自动分类语法说明:")
-    print("  - skip:domain.com            # 只从数据源跳过，不阻止其他规则")
-    print("  - remove:domain.com          # 将域名添加到移除列表")
-    print("  - low_priority:domain.com    # 将域名添加到低优先级列表")
-    print("  - high_priority:domain.com   # 将域名添加到高优先级列表")
-    print("  - replace:old.com=new.com    # 替换规则")
-    print("  - remove:*.domain.com        # 支持通配符匹配子域名")
-
-    print("\n🔄 Skip 规则行为说明:")
-    print("  - skip 只影响从数据源的默认处理")
-    print("  - 如果同一域名有多个规则，明确的分类规则会覆盖 skip")
-    print("  - 例如：skip:csdn.net + low_priority:csdn.net = csdn.net 被添加到低优先级")
-
-    print("\n📁 支持的文件格式:")
-    print("  - domain: 纯域名格式，每行一个域名")
-    print("  - regex: 正则表达式格式，直接使用")
-    print("  - ublock: uBlock Origin 格式")
-    print("  - v2ray: v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)")
-    print("  - replace: 替换格式，old_domain=new_domain")
-    print("  - classify: 自动分类格式，action:domain")
-    print("  - 🆕 csv: CSV 格式，从指定列提取 URL 并转换为域名")
-
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray格式 - 保持原始结构 + CSV支持 + 特定路径低优先级) - Skip 修复版")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 - 精简版")
     parser.add_argument("-c", "--config", help="配置文件路径")
-    parser.add_argument("--create-config", action="store_true", help="创建示例配置文件和示例规则文件")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式")
 
     args = parser.parse_args()
-
-    if args.create_config:
-        create_sample_config()
-        return
 
     generator = SearXNGHostnamesGenerator(args.config, force_single_regex=args.single_regex)
     generator.run()
