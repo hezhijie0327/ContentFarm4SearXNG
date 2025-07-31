@@ -1,4 +1,5 @@
 # SearXNG low_priority rules
-# Total rules: 1, Total domains: 1
+# Total rules: 2, Total domains: 2
 
 - (.*\.)?csdn\.net$
+- (.*\.)?zhihu\.com$
