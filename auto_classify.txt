@@ -36,6 +36,10 @@ high_priority:wikipedia.org
 high_priority:arxiv.org
 high_priority:scholar.google.com
 
+# CN 权威类
+high_priority:edu.cn
+high_priority:gov.cn
+
 # =============================================================================
 # 低优先级规则 (Low Priority Rules)  
 # =============================================================================
