@@ -36,6 +36,7 @@ class SearXNGHostnamesGenerator:
             'parsed_domains': 0,
             'ignored_with_path': 0,
             'path_to_low_priority': 0,  # 特定路径设置为低优先级的数量
+            'path_kept_action': 0,      # 🔧 特定路径保持原动作的数量
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
@@ -127,6 +128,13 @@ class SearXNGHostnamesGenerator:
                     },
                     "enabled": True
                 },
+                {
+                    "name": "bcaso - Computer Science Whitelist",
+                    "url": "https://raw.githubusercontent.com/bcaso/Computer-Science-Whitelist/refs/heads/main/whitelists/domain_name.txt",
+                    "action": "high_priority",
+                    "format": "ublock",
+                    "enabled": True
+                },
             ],
 
             # 自定义规则配置（从文件读取）
@@ -165,7 +173,12 @@ class SearXNGHostnamesGenerator:
             # 解析配置
             "parsing": {
                 "ignore_specific_paths": False,     # 不忽略特定路径规则
-                "specific_path_action": "low_priority",  # 特定路径规则处理方式
+                # 🔧 修复：特定路径规则处理方式的详细说明和默认值修改
+                "specific_path_action": "smart",  # 特定路径规则处理方式：
+                                                        # - "keep_action": 保持源的原始动作 (推荐)
+                                                        # - "low_priority": 强制设为低优先级
+                                                        # - "ignore": 完全忽略
+                                                        # - "smart": 智能处理 (remove->low_priority, 其他保持)
                 "ignore_ip": True,     # 忽略IP地址
                 "ignore_localhost": True,  # 忽略本地主机
                 "strict_domain_level_check": True,  # 严格检查域名级别规则
@@ -1263,9 +1276,39 @@ class SearXNGHostnamesGenerator:
             else:
                 return None, "无法解析规则格式", False
 
+    def determine_path_rule_action(self, source_action: str, specific_path_action: str) -> str:
+        """
+        🔧 新增：确定特定路径规则的最终动作
+
+        Args:
+            source_action: 数据源的原始动作
+            specific_path_action: 特定路径规则的配置动作
+
+        Returns:
+            最终的动作
+        """
+        if specific_path_action == "keep_action":
+            # 保持源的原始动作
+            return source_action
+        elif specific_path_action == "low_priority":
+            # 强制设为低优先级
+            return "low_priority"
+        elif specific_path_action == "smart":
+            # 智能处理：remove->low_priority，其他保持
+            if source_action == "remove":
+                return "low_priority"
+            else:
+                return source_action
+        elif specific_path_action == "ignore":
+            # 忽略，返回 None
+            return None
+        else:
+            # 默认情况，保持原始动作
+            return source_action
+
     def fetch_domain_list(self, url: str, format_type: str = "domain", source_name: str = None, csv_config: Dict = None) -> Tuple[Set[str], Set[str], Dict]:
         """
-        🐛 修复：从URL获取域名列表，正确处理特定路径规则
+        🔧 修复：从URL获取域名列表，正确处理特定路径规则的动作分配
 
         Args:
             url: 域名列表URL
@@ -1274,15 +1317,16 @@ class SearXNGHostnamesGenerator:
             csv_config: CSV 配置（当 format_type 为 csv 时使用）
 
         Returns:
-            (域名集合, 特定路径域名集合, 统计信息)
+            (普通域名集合, 特定路径域名集合(已分类), 统计信息)
         """
         domains = set()
-        path_domains = set()
+        path_domains_classified = {}  # 🔧 改为字典存储分类后的特定路径域名
         stats = {
             'total_rules': 0,
             'parsed_domains': 0,
             'ignored_with_path': 0,
             'path_to_low_priority': 0,
+            'path_kept_action': 0,      # 🔧 新增统计
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
@@ -1313,7 +1357,7 @@ class SearXNGHostnamesGenerator:
                 if format_type == "csv":
                     if not csv_config:
                         print(f"  ❌ CSV 格式需要 csv_config 配置")
-                        return domains, path_domains, stats
+                        return domains, path_domains_classified, stats
 
                     return self._parse_csv_from_response(response.text, csv_config, source_name, stats)
 
@@ -1323,13 +1367,18 @@ class SearXNGHostnamesGenerator:
                 comment_samples = []
                 path_samples = []  # 路径规则样本
                 skip_samples = []  # 跳过的域名样本
-                path_to_low_priority_samples = []  # 🔄 特定路径转低优先级样本
+                path_to_low_priority_samples = []  # 特定路径转低优先级样本
+                path_kept_action_samples = []      # 🔧 特定路径保持动作样本
 
                 # 重置 v2ray 标签计数器
                 initial_v2ray_tags = self.stats.get('v2ray_with_tags', 0)
 
                 # 重置调试计数器
                 self._debug_path_count = 0
+
+                # 🔧 获取源动作和特定路径处理配置
+                source_action = getattr(self, '_current_source_action', 'remove')  # 临时存储当前源动作
+                specific_path_action = self.config["parsing"].get("specific_path_action", "keep_action")
 
                 # 解析域名
                 for line_num, line in enumerate(response.text.strip().split('\n'), 1):
@@ -1341,7 +1390,7 @@ class SearXNGHostnamesGenerator:
 
                     try:
                         if format_type == "ublock":
-                            # 🐛 修复：使用新的 parse_ublock_rule 方法
+                            # 🔧 修复：使用新的 parse_ublock_rule 方法
                             domain, ignore_reason, is_path_rule = self.parse_ublock_rule(line)
 
                             if domain:
@@ -1352,19 +1401,32 @@ class SearXNGHostnamesGenerator:
                                     if len(skip_samples) < 3:
                                         skip_samples.append(f"{line} -> {domain} ({skip_reason})")
                                 else:
-                                    # 🐛 修复：根据是否是特定路径规则来分类
+                                    # 🔧 修复：根据是否是特定路径规则和配置决定如何处理
                                     if is_path_rule:
-                                        # 特定路径规则根据配置处理
-                                        specific_path_action = self.config["parsing"].get("specific_path_action", "low_priority")
-                                        if specific_path_action == "low_priority":
-                                            path_domains.add(domain)
+                                        # 确定特定路径规则的最终动作
+                                        final_action = self.determine_path_rule_action(source_action, specific_path_action)
+
+                                        if final_action is None:
+                                            # 忽略这个域名
+                                            stats['ignored_with_path'] += 1
+                                            if len(path_samples) < 3:
+                                                path_samples.append(f"{line} -> {domain} (忽略)")
+                                        elif final_action == "low_priority":
+                                            # 初始化分类字典
+                                            if final_action not in path_domains_classified:
+                                                path_domains_classified[final_action] = set()
+                                            path_domains_classified[final_action].add(domain)
                                             stats['path_to_low_priority'] += 1
-                                            if len(path_to_low_priority_samples) < 5:  # 增加样本数量
+                                            if len(path_to_low_priority_samples) < 5:
                                                 path_to_low_priority_samples.append(f"{line} -> {domain} (路径规则->低优先级)")
-                                        elif specific_path_action == "keep_action":
-                                            domains.add(domain)
-                                            stats['parsed_domains'] += 1
-                                        # ignore 情况下不添加到任何集合
+                                        else:
+                                            # 保持原动作或其他动作
+                                            if final_action not in path_domains_classified:
+                                                path_domains_classified[final_action] = set()
+                                            path_domains_classified[final_action].add(domain)
+                                            stats['path_kept_action'] += 1
+                                            if len(path_kept_action_samples) < 5:
+                                                path_kept_action_samples.append(f"{line} -> {domain} (路径规则->{final_action})")
                                     else:
                                         # 普通域名规则
                                         if domain in domains:
@@ -1462,11 +1524,15 @@ class SearXNGHostnamesGenerator:
                 current_v2ray_tags = self.stats.get('v2ray_with_tags', 0) - initial_v2ray_tags
                 stats['v2ray_with_tags'] = current_v2ray_tags
 
-                print(f"成功获取 {len(domains)} 个域名")
+                # 计算特定路径域名总数
+                total_path_domains = sum(len(domain_set) for domain_set in path_domains_classified.values())
+
+                print(f"成功获取 {len(domains)} 个普通域名，{total_path_domains} 个特定路径域名")
                 print(f"  - 总规则: {stats['total_rules']}")
                 print(f"  - 成功解析: {stats['parsed_domains']}")
                 print(f"  - 忽略(特定路径): {stats['ignored_with_path']}")
-                print(f"  - 🐛 特定路径->低优先级: {stats['path_to_low_priority']}")
+                print(f"  - 🔧 特定路径->低优先级: {stats['path_to_low_priority']}")
+                print(f"  - 🔧 特定路径保持原动作: {stats['path_kept_action']}")
                 print(f"  - 忽略(注释): {stats['ignored_comments']}")
                 print(f"  - 忽略(无效域名): {stats['invalid_domains']}")
                 print(f"  - 重复域名: {stats['duplicate_domains']}")
@@ -1481,9 +1547,14 @@ class SearXNGHostnamesGenerator:
                         print(f"    ✓ {sample}")
 
                 if path_to_low_priority_samples:
-                    print(f"  - 🐛 特定路径->低优先级样本:")
+                    print(f"  - 🔧 特定路径->低优先级样本:")
                     for sample in path_to_low_priority_samples:
                         print(f"    📍 {sample}")
+
+                if path_kept_action_samples:
+                    print(f"  - 🔧 特定路径保持动作样本:")
+                    for sample in path_kept_action_samples:
+                        print(f"    🎯 {sample}")
 
                 if skip_samples:
                     print(f"  - 跳过的域名样本:")
@@ -1505,7 +1576,7 @@ class SearXNGHostnamesGenerator:
                     for sample in ignored_samples:
                         print(f"    ✗ {sample}")
 
-                return domains, path_domains, stats
+                return domains, path_domains_classified, stats
 
             except requests.RequestException as e:
                 print(f"获取失败 (尝试 {attempt + 1}/{retry_count}): {e}")
@@ -1514,11 +1585,11 @@ class SearXNGHostnamesGenerator:
                 else:
                     print(f"放弃获取 {url}")
 
-        return domains, set(), stats
+        return domains, {}, stats
 
-    def _parse_csv_from_response(self, csv_content: str, csv_config: Dict, source_name: str, stats: Dict) -> Tuple[Set[str], Set[str], Dict]:
+    def _parse_csv_from_response(self, csv_content: str, csv_config: Dict, source_name: str, stats: Dict) -> Tuple[Set[str], Dict[str, Set[str]], Dict]:
         """
-        从 HTTP 响应内容解析 CSV 格式的域名
+        🔧 修复：从 HTTP 响应内容解析 CSV 格式的域名
 
         Args:
             csv_content: CSV 内容字符串
@@ -1527,10 +1598,10 @@ class SearXNGHostnamesGenerator:
             stats: 统计信息字典
 
         Returns:
-            (域名集合, 特定路径域名集合, 统计信息)
+            (域名集合, 特定路径域名分类字典, 统计信息)
         """
         domains = set()
-        path_domains = set()  # CSV 通常不包含特定路径规则
+        path_domains = {}  # CSV 通常不包含特定路径规则，但为了接口一致性
 
         # CSV 配置默认值
         has_header = csv_config.get("has_header", True)
@@ -2302,8 +2373,7 @@ class SearXNGHostnamesGenerator:
 
     def collect_domains(self) -> Dict[str, Set[str]]:
         """
-        从所有配置的源收集域名
-        🐛 修复：正确处理特定路径规则
+        🔧 修复：从所有配置的源收集域名，正确处理特定路径规则的动作分配
 
         Returns:
             按动作分类的域名集合
@@ -2320,6 +2390,7 @@ class SearXNGHostnamesGenerator:
             'parsed_domains': 0,
             'ignored_with_path': 0,
             'path_to_low_priority': 0,  # 特定路径转低优先级数量
+            'path_kept_action': 0,      # 🔧 特定路径保持原动作数量
             'invalid_domains': 0,
             'duplicate_domains': 0,
             'ignored_comments': 0,
@@ -2334,6 +2405,14 @@ class SearXNGHostnamesGenerator:
             'csv_extracted_domains': 0
         }
 
+        # 记录每个类别的域名数量
+        self.category_domain_counts = {
+            'remove': 0,
+            'low_priority': 0,
+            'high_priority': 0,
+            'replace': 0
+        }
+
         # 从在线源收集域名
         for source in self.config["sources"]:
             if not source.get("enabled", True):
@@ -2342,18 +2421,21 @@ class SearXNGHostnamesGenerator:
             print(f"\n处理数据源: {source['name']}")
             format_type = source.get("format", "domain")
             csv_config = source.get("csv_config") if format_type == "csv" else None
-            print(f"格式类型: {format_type}")
+            source_action = source.get("action", "remove")
+            print(f"格式类型: {format_type}，原始动作: {source_action}")
 
-            # 🐛 修复：获取特定路径域名
-            domains, path_domains, source_stats = self.fetch_domain_list(source["url"], format_type, source["name"], csv_config)
+            # 🔧 设置临时变量供 fetch_domain_list 使用
+            self._current_source_action = source_action
+
+            # 🔧 修复：获取普通域名和已分类的特定路径域名
+            domains, path_domains_classified, source_stats = self.fetch_domain_list(source["url"], format_type, source["name"], csv_config)
 
             # 累加统计信息
             for key in self.stats:
                 if key in source_stats:
                     self.stats[key] += source_stats[key]
 
-            # 处理域名分类
-            source_action = source.get("action", "remove")
+            # 🔧 处理普通域名分类
             auto_classified_count = 0
 
             for domain in list(domains):
@@ -2371,39 +2453,39 @@ class SearXNGHostnamesGenerator:
                     if source_action in categorized_domains:
                         categorized_domains[source_action].add(domain)
 
-            # 🐛 修复：处理特定路径域名
-            if path_domains:
-                specific_path_action = self.config["parsing"].get("specific_path_action", "low_priority")
-                path_auto_classified_count = 0
+            # 🔧 处理特定路径域名（已经按动作分类）
+            path_auto_classified_count = 0
+            total_path_domains = 0
 
-                for domain in path_domains:
-                    # 检查自动分类规则
+            for path_action, path_domain_set in path_domains_classified.items():
+                for domain in path_domain_set:
+                    # 检查自动分类规则（优先级最高）
                     auto_action, reason = self.get_auto_classify_action(domain)
                     if auto_action:
                         categorized_domains[auto_action].add(domain)
                         path_auto_classified_count += 1
                         if path_auto_classified_count <= 3:
-                            print(f"  🔄 特定路径域名自动分类: {domain} -> {auto_action} ({reason})")
+                            print(f"  🔄 特定路径域名自动分类覆盖: {domain} -> {auto_action} ({reason}) (原为 {path_action})")
                     else:
-                        if specific_path_action == "low_priority":
-                            categorized_domains['low_priority'].add(domain)
-                        elif specific_path_action == "keep_action":
-                            # 保持原有动作
-                            if source_action in categorized_domains:
-                                categorized_domains[source_action].add(domain)
+                        # 使用已确定的路径动作
+                        if path_action in categorized_domains:
+                            categorized_domains[path_action].add(domain)
+                        total_path_domains += 1
 
-                auto_classified_count += path_auto_classified_count
-                print(f"  📍 特定路径规则处理: {len(path_domains)} 个域名 (自动分类: {path_auto_classified_count})")
+            auto_classified_count += path_auto_classified_count
 
             if auto_classified_count > 0:
-                print(f"  ✅ 自动分类处理: {auto_classified_count} 个域名")
+                print(f"  ✅ 自动分类处理: {auto_classified_count} 个域名 (普通: {auto_classified_count - path_auto_classified_count}, 特定路径: {path_auto_classified_count})")
                 self.stats['auto_classified'] += auto_classified_count
 
             # 记录从数据源跳过的域名数量
             self.stats['skipped_from_sources'] += source_stats.get('skipped_domains', 0)
 
-            total_added = len(domains) + len(path_domains)
-            print(f"已添加 {total_added} 个域名到相应类别 (常规: {len(domains)}, 特定路径: {len(path_domains)})")
+            total_added = len(domains) + total_path_domains
+            print(f"已添加 {total_added} 个域名到相应类别 (普通: {len(domains)}, 特定路径: {total_path_domains})")
+
+            # 清除临时变量
+            delattr(self, '_current_source_action')
 
         # 从自定义规则文件加载
         print(f"\n处理自定义规则文件...")
@@ -2493,7 +2575,7 @@ class SearXNGHostnamesGenerator:
         parsing_config = self.config["parsing"]
         print(f"📝 解析配置:")
         print(f"   - 忽略特定路径规则: {parsing_config.get('ignore_specific_paths', False)}")
-        print(f"   - 🐛 特定路径规则处理: {parsing_config.get('specific_path_action', 'low_priority')}")
+        print(f"   - 🔧 特定路径规则处理: {parsing_config.get('specific_path_action', 'keep_action')}")
         print(f"   - 严格域名级别检查: {parsing_config.get('strict_domain_level_check', True)}")
         print(f"   - 保持原始结构: {parsing_config.get('preserve_original_structure', True)}")
         print(f"   - 保持 www. 前缀: {parsing_config.get('preserve_www_prefix', True)}")
@@ -2714,9 +2796,9 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 - 修复版")
-        print("🐛 修复：改进特定路径识别逻辑，正确处理 /wiki/* 等路径")
-        print("🔧 精简：移除无用代码，优化性能")
+        print("SearXNG Hostnames 规则生成器启动 - 特定路径修复版")
+        print("🔧 修复：特定路径规则现在会正确遵循源的动作设置")
+        print("🔧 新增：支持 smart 和 keep_action 等特定路径处理模式")
         print("=" * 60)
 
         try:
@@ -2773,7 +2855,8 @@ class SearXNGHostnamesGenerator:
         print(f"  - 总输入规则: {self.stats['total_rules']:,}")
         print(f"  - 成功解析域名: {self.stats['parsed_domains']:,}")
         print(f"  - 忽略(特定路径): {self.stats['ignored_with_path']:,}")
-        print(f"  - 🐛 特定路径->低优先级: {self.stats.get('path_to_low_priority', 0):,}")
+        print(f"  - 🔧 特定路径->低优先级: {self.stats.get('path_to_low_priority', 0):,}")
+        print(f"  - 🔧 特定路径保持原动作: {self.stats.get('path_kept_action', 0):,}")
         print(f"  - 忽略(注释): {self.stats['ignored_comments']:,}")
         print(f"  - 忽略(无效域名): {self.stats['invalid_domains']:,}")
         print(f"  - 重复域名: {self.stats['duplicate_domains']:,}")
@@ -2791,16 +2874,21 @@ class SearXNGHostnamesGenerator:
 
         print(f"\n📁 输出目录: {self.config['output']['directory']}")
 
-        print(f"\n🐛 特定路径规则处理:")
-        specific_path_action = self.config['parsing'].get('specific_path_action', 'low_priority')
+        print(f"\n🔧 特定路径规则处理:")
+        specific_path_action = self.config['parsing'].get('specific_path_action', 'keep_action')
         print(f"  - 处理模式: {specific_path_action}")
         if specific_path_action == 'low_priority':
             print(f"  - 转为低优先级的数量: {self.stats.get('path_to_low_priority', 0):,}")
-            print(f"  - 效果: 特定路径规则的域名被设置为低优先级，保持可搜索性")
+            print(f"  - 效果: 所有特定路径规则强制设置为低优先级")
+        elif specific_path_action == 'keep_action':
+            print(f"  - 保持原动作的数量: {self.stats.get('path_kept_action', 0):,}")
+            print(f"  - 转为低优先级的数量: {self.stats.get('path_to_low_priority', 0):,}")
+            print(f"  - 效果: 特定路径规则保持源的原始动作 (推荐)")
+        elif specific_path_action == 'smart':
+            print(f"  - 智能处理的数量: {self.stats.get('path_kept_action', 0):,} + {self.stats.get('path_to_low_priority', 0):,}")
+            print(f"  - 效果: remove->low_priority，其他动作保持不变")
         elif specific_path_action == 'ignore':
             print(f"  - 效果: 特定路径规则被完全忽略")
-        elif specific_path_action == 'keep_action':
-            print(f"  - 效果: 特定路径规则保持原有动作分类")
 
         print(f"\n✨ 优化效果:")
         if total_domains > 0 and total_rules > 0:
@@ -2819,7 +2907,7 @@ class SearXNGHostnamesGenerator:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 - 修复版")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 - 特定路径修复版")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式")
 
