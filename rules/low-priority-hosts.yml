@@ -1,9 +1,12 @@
 # SearXNG low_priority rules
-# Total rules: 6, Total domains: 16
+# Total rules: 9, Total domains: 19
 
-- (.*\.)?((cdweb|csdn|ettoday)\.net|ask\.csdn\.net)$
-- (.*\.)?((codingdict|qiniu|volcengine|xbuba|zhihu)\.com|(cloud|gwb)\.tencent\.com)$
+- (.*\.)?((51cto|aiops|eliveint|worktile|zhihu)\.com|(cloud\.baidu|cloud\.tencent|developer\.aliyun|gwb\.tencent)\.com)$
+- (.*\.)?(cdweb|csdn)\.net$
 - (.*\.)?(ctyun|ucloud)\.cn$
 - (.*\.)?fadian\.cc$
+- (.*\.)?scholarship\.edu\.vn$
+- (.*\.)?secret\-bases\.co\.uk$
 - (.*\.)?so\.php$
+- (.*\.)?www\.coder\.work$
 - (.*\.)?zhongguojie\.org$
