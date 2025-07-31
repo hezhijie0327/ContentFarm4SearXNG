@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
-SearXNG Hostnames 规则生成器 - 完善版 (支持 v2ray 格式 - 保持原始结构 + CSV 格式支持)
-- 支持低优先级/高优先级/替换规则从外部文件读取
-- 白名单功能改为自动分类语法功能，支持 remove:baidu.com 等语法
-- 修复：skip 规则只影响数据源处理，不阻止明确的自动分类规则
-- 新增：支持 v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)
-- 修正：保持原始域名结构，不移除 www. 等前缀
-- 🆕 新增：支持 CSV 格式解析，可指定特定列读取 Hostname
-- 🔄 修复：特定路径规则正确识别并设置为低优先级
-- 🐛 修复：改进特定路径识别逻辑，正确处理 /wiki/* 等路径
+SearXNG Hostnames 规则生成器
 
 pip install requests pyyaml argparse
 """
