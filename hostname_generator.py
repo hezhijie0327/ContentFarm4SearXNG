@@ -48,6 +48,7 @@ class SearXNGHostnamesGenerator:
             'csv_parsed_rows': 0,  # CSV 解析的行数
             'csv_invalid_urls': 0,  # CSV 中无效 URL 的数量
             'csv_extracted_domains': 0,  # CSV 中成功提取的域名数量
+            'wildcard_rules_processed': 0,  # 🔧 处理的通配符规则数量
         }
         # 记录每个类别的域名数量
         self.category_domain_counts = {
@@ -130,7 +131,7 @@ class SearXNGHostnamesGenerator:
                 },
                 {
                     "name": "bcaso - Computer Science Whitelist",
-                    "url": "https://raw.githubusercontent.com/bcaso/Computer-Science-Whitelist/refs/heads/main/whitelists/whitelists_combined.txt",
+                    "url": "https://raw.githubusercontent.com/bcaso/Computer-Science-Whitelist/refs/heads/main/whitelists/domain_name.txt",
                     "action": "high_priority",
                     "format": "ublock",
                     "enabled": True
@@ -1174,7 +1175,7 @@ class SearXNGHostnamesGenerator:
 
     def extract_domain_from_rule(self, rule: str) -> str:
         """
-        从规则中提取域名
+        🔧 修复：从规则中提取域名，支持更多格式
 
         Args:
             rule: 规则字符串
@@ -1188,37 +1189,52 @@ class SearXNGHostnamesGenerator:
         # 首先检查是否包含具体路径
         has_specific_path = self._has_specific_path(rule)
 
-        # uBlock 语法模式 - 用于所有规则
+        # 🔧 新增：支持更多的uBlock规则格式
         patterns = [
-            # *://*.domain.com/* 或 *://*.domain.com (通配符子域名)
+            # 🔧 新增：*.domain.com/* 格式 (通配符域名)
+            r'^\*\.([a-zA-Z0-9.-]+)(?:/.*)?(?:\*)?$',
+            # 🔧 新增：*.domain.com/path/* 格式
+            r'^\*\.([a-zA-Z0-9.-]+)/.*(?:\*)?$',
+            # 原有：*://*.domain.com/* 或 *://*.domain.com (通配符子域名)
             r'^\*://\*\.([a-zA-Z0-9.-]+)(?:/.*)?$',
-            # *://domain.com/* 或 *://domain.com (无通配符)
+            # 原有：*://domain.com/* 或 *://domain.com (无通配符)
             r'^\*://([a-zA-Z0-9.-]+)(?:/.*)?$',
-            # ||domain.com^ 或 ||domain.com/path
+            # 🔧 新增：https://domain.com/* 格式
+            r'^https?://([a-zA-Z0-9.-]+)(?:/.*)?$',
+            # 原有：||domain.com^ 或 ||domain.com/path
             r'^\|\|([a-zA-Z0-9.-]+)(?:/.*)?(?:\^)?$',
-            # 普通域名格式
+            # 🔧 新增：domain.com/* 格式
+            r'^([a-zA-Z0-9.-]+)/.*(?:\*)?$',
+            # 原有：普通域名格式
             r'^([a-zA-Z0-9.-]+)(?:/.*)?$',
-            # *://*/path - 特殊情况，提取通配符前的域名
-            r'^\*://\*/(.+)$',
+            # 🔧 修复：domain.com* 格式（不带斜杠的通配符）
+            r'^([a-zA-Z0-9.-]+)\*$',
         ]
 
         for pattern in patterns:
             match = re.match(pattern, rule)
             if match:
                 candidate = match.group(1)
-                # 对于 *://*/path 这种情况，candidate 是路径，我们需要返回 None
-                if candidate and not candidate.startswith('/') and '.' in candidate:
-                    return candidate
+                # 验证提取的候选域名
+                if candidate and '.' in candidate and not candidate.startswith('/'):
+                    # 🔧 进一步验证域名格式
+                    if self.is_valid_domain(candidate):
+                        return candidate
+                    else:
+                        # 如果域名验证失败，显示调试信息
+                        debug_count = getattr(self, '_debug_extract_count', 0)
+                        if debug_count < 3:
+                            print(f"  🔧 域名格式验证失败: {rule} -> {candidate}")
+                            self._debug_extract_count = debug_count + 1
 
-        # 🔄 修复：对于 *://*/filename 这种格式，我们无法提取有效域名，返回 None
+        # 🔄 对于 *://*/filename 这种格式，我们无法提取有效域名，返回 None
         if rule.startswith('*://*/'):
             return None
 
-        # 通用域名提取（最后的后备方案）
-        domain_match = re.search(r'([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', rule)
-        if domain_match:
-            candidate = domain_match.group(1)
-            # 验证这个域名是否合理
+        # 🔧 增强的通用域名提取（最后的后备方案）
+        # 尝试提取所有可能的域名格式
+        domain_candidates = re.findall(r'([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', rule)
+        for candidate in domain_candidates:
             if self.is_valid_domain(candidate):
                 return candidate
 
@@ -1258,22 +1274,31 @@ class SearXNGHostnamesGenerator:
         if domain:
             cleaned_domain = self.clean_domain(domain)
             if cleaned_domain:
-                # 🐛 修复：显示特定路径规则的调试信息
-                if has_specific_path:
-                    # 只显示前几个样本
-                    debug_count = getattr(self, '_debug_path_count', 0)
-                    if debug_count < 5:
-                        print(f"  🐛 特定路径规则识别: {original_rule} -> 域名: {cleaned_domain}")
-                        self._debug_path_count = debug_count + 1
+                # 🔧 显示解析成功的样本（包括通配符规则）
+                debug_count = getattr(self, '_debug_success_count', 0)
+                if debug_count < 5:
+                    if has_specific_path:
+                        print(f"  ✅ 特定路径规则解析: {original_rule} -> 域名: {cleaned_domain}")
+                    elif original_rule.startswith('*.'):
+                        print(f"  🔧 通配符规则解析: {original_rule} -> 域名: {cleaned_domain}")
+                        self.stats['wildcard_rules_processed'] += 1
+                    else:
+                        print(f"  ✅ 普通规则解析: {original_rule} -> 域名: {cleaned_domain}")
+                    self._debug_success_count = debug_count + 1
 
                 return cleaned_domain, None, has_specific_path
             else:
-                return None, "无效域名", has_specific_path
+                return None, "域名清理后无效", has_specific_path
         else:
             # 🔄 对于无法提取域名的特定路径规则，也要标记为特定路径
             if has_specific_path:
                 return None, "特定路径规则但无法提取域名", True
             else:
+                # 显示一些无法解析的规则样本
+                debug_count = getattr(self, '_debug_fail_count', 0)
+                if debug_count < 3:
+                    print(f"  ❌ 无法解析规则: {original_rule}")
+                    self._debug_fail_count = debug_count + 1
                 return None, "无法解析规则格式", False
 
     def determine_path_rule_action(self, source_action: str, specific_path_action: str) -> str:
@@ -1335,7 +1360,8 @@ class SearXNGHostnamesGenerator:
             'v2ray_with_tags': 0,   # v2ray 带标签的规则数量
             'csv_parsed_rows': 0,
             'csv_invalid_urls': 0,
-            'csv_extracted_domains': 0
+            'csv_extracted_domains': 0,
+            'wildcard_rules_processed': 0,  # 🔧 处理的通配符规则数量
         }
 
         retry_count = self.config["request_config"]["retry_count"]
@@ -1375,10 +1401,16 @@ class SearXNGHostnamesGenerator:
 
                 # 重置调试计数器
                 self._debug_path_count = 0
+                self._debug_success_count = 0
+                self._debug_fail_count = 0
+                self._debug_extract_count = 0
 
                 # 🔧 获取源动作和特定路径处理配置
                 source_action = getattr(self, '_current_source_action', 'remove')  # 临时存储当前源动作
                 specific_path_action = self.config["parsing"].get("specific_path_action", "keep_action")
+
+                print(f"  🔧 特定路径处理模式: {specific_path_action}")
+                print(f"  🔧 源动作: {source_action}")
 
                 # 解析域名
                 for line_num, line in enumerate(response.text.strip().split('\n'), 1):
@@ -1520,9 +1552,10 @@ class SearXNGHostnamesGenerator:
                         stats['invalid_domains'] += 1
                         continue
 
-                # 计算本次请求中的 v2ray 标签数量
+                # 计算本次请求中的 v2ray 标签数量和通配符规则数量
                 current_v2ray_tags = self.stats.get('v2ray_with_tags', 0) - initial_v2ray_tags
                 stats['v2ray_with_tags'] = current_v2ray_tags
+                stats['wildcard_rules_processed'] = self.stats.get('wildcard_rules_processed', 0)
 
                 # 计算特定路径域名总数
                 total_path_domains = sum(len(domain_set) for domain_set in path_domains_classified.values())
@@ -1539,6 +1572,8 @@ class SearXNGHostnamesGenerator:
                 print(f"  - 跳过域名: {stats['skipped_domains']}")
                 if format_type == "v2ray" and stats['v2ray_with_tags'] > 0:
                     print(f"  - v2ray 带标签规则: {stats['v2ray_with_tags']}")
+                if stats['wildcard_rules_processed'] > 0:
+                    print(f"  - 🔧 通配符规则处理: {stats['wildcard_rules_processed']}")
 
                 # 显示样本
                 if accepted_samples:
@@ -1791,7 +1826,7 @@ class SearXNGHostnamesGenerator:
 
     def is_valid_domain(self, domain: str) -> bool:
         """
-        验证域名格式
+        🔧 改进：验证域名格式，更宽松的验证逻辑
 
         Args:
             domain: 域名字符串
@@ -1802,12 +1837,38 @@ class SearXNGHostnamesGenerator:
         if not domain or len(domain) > 255:
             return False
 
-        # 基本的域名格式验证
-        domain_pattern = re.compile(
-            r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
-        )
+        # 🔧 改进的域名格式验证，更宽松
+        # 允许更多字符，包括一些特殊情况
 
-        return bool(domain_pattern.match(domain))
+        # 基本检查：至少包含一个点
+        if '.' not in domain:
+            return False
+
+        # 分割域名各部分
+        parts = domain.split('.')
+
+        # 检查是否有空的部分
+        if any(not part for part in parts):
+            return False
+
+        # 检查每个部分的格式
+        for part in parts:
+            # 🔧 允许更宽松的字符集，包括连字符
+            if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$', part):
+                # 🔧 特殊情况：单个字符的部分也允许
+                if len(part) == 1 and re.match(r'^[a-zA-Z0-9]$', part):
+                    continue
+                return False
+
+            # 检查长度限制
+            if len(part) > 63:
+                return False
+
+        # 检查最后一个部分（TLD）是否至少有2个字符
+        if len(parts[-1]) < 2:
+            return False
+
+        return True
 
     def domain_to_regex(self, domain: str) -> str:
         """
@@ -2402,7 +2463,8 @@ class SearXNGHostnamesGenerator:
             'v2ray_with_tags': 0,
             'csv_parsed_rows': 0,
             'csv_invalid_urls': 0,
-            'csv_extracted_domains': 0
+            'csv_extracted_domains': 0,
+            'wildcard_rules_processed': 0,  # 🔧 处理的通配符规则数量
         }
 
         # 记录每个类别的域名数量
@@ -2796,9 +2858,10 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 - 特定路径修复版")
-        print("🔧 修复：特定路径规则现在会正确遵循源的动作设置")
-        print("🔧 新增：支持 smart 和 keep_action 等特定路径处理模式")
+        print("SearXNG Hostnames 规则生成器启动 - 域名提取修复版")
+        print("🔧 修复：改进域名提取逻辑，支持更多规则格式")
+        print("🔧 修复：改进域名验证逻辑，减少误判")
+        print("🔧 新增：支持通配符规则处理")
         print("=" * 60)
 
         try:
@@ -2861,6 +2924,8 @@ class SearXNGHostnamesGenerator:
         print(f"  - 忽略(无效域名): {self.stats['invalid_domains']:,}")
         print(f"  - 重复域名: {self.stats['duplicate_domains']:,}")
 
+        if self.stats.get('wildcard_rules_processed', 0) > 0:
+            print(f"  - 🔧 通配符规则处理: {self.stats.get('wildcard_rules_processed', 0):,}")
         if self.stats.get('auto_classified', 0) > 0:
             print(f"  - 自动分类处理: {self.stats.get('auto_classified', 0):,}")
         if self.stats.get('auto_added', 0) > 0:
@@ -2907,7 +2972,7 @@ class SearXNGHostnamesGenerator:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 - 特定路径修复版")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 - 域名提取修复版")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式")
 
