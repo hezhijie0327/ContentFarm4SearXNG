@@ -27,7 +27,10 @@ skip:dingtalk.com
 # 技术类
 high_priority:github.com
 high_priority:stackoverflow.com
+
+# 论坛/博客类
 high_priority:v2ex.com
+high_priority:linux.do
 high_priority:cnblogs.com
 high_priority:reddit.com
 
@@ -44,9 +47,8 @@ high_priority:gov.cn
 # 低优先级规则 (Low Priority Rules)  
 # =============================================================================
 
-# 论坛类
+# 论坛/博客类
 low_priority:csdn.net
-low_priority:zhihu.com
 
 # =============================================================================
 # 移除规则 (Remove Rules)
