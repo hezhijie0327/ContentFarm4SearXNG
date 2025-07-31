@@ -1138,7 +1138,8 @@ class SearXNGHostnamesGenerator:
 
     def _has_specific_path(self, url_string: str) -> bool:
         """
-        🐛 修复：检查URL是否包含具体的路径（非域名级别）
+        简化版：检查URL是否包含具体的路径（非域名级别）
+        只要有路径部分（不为空且不是单独的'*'），就认为是特定路径
 
         Args:
             url_string: URL字符串
@@ -1160,42 +1161,9 @@ class SearXNGHostnamesGenerator:
             if len(domain_and_path) > 1:
                 path_part = domain_and_path[1]
 
-                # 🐛 修复：改进特定路径识别逻辑
-                if path_part and path_part not in ['', '*']:
-                    # 1. 包含明显的文件扩展名
-                    if '.' in path_part and any(ext in path_part.lower() for ext in ['.php', '.asp', '.jsp', '.html', '.htm', '.cgi', '.xml', '.json']):
-                        return True
-
-                    # 2. 包含查询参数或等号
-                    if '?' in path_part or '=' in path_part:
-                        return True
-
-                    # 3. 🐛 修复：包含常见的目录名，如 wiki, admin, blog 等
-                    common_paths = ['wiki', 'admin', 'blog', 'forum', 'news', 'shop', 'store', 'user', 'member', 'login', 'register']
-                    path_lower = path_part.lower().rstrip('/*')  # 移除末尾的 /* 通配符
-
-                    # 检查是否是常见路径
-                    if path_lower in common_paths:
-                        return True
-
-                    # 检查是否以常见路径开头
-                    for common_path in common_paths:
-                        if path_lower.startswith(common_path + '/') or path_lower.startswith(common_path + '?'):
-                            return True
-
-                    # 4. 包含多个路径段的复杂路径
-                    if '/' in path_part.rstrip('/*') and len(path_part.rstrip('/*')) > 3:
-                        return True
-
-                    # 5. 长路径且不以 * 结尾（可能是具体页面）
-                    if len(path_part) > 8 and not path_part.endswith('*'):
-                        return True
-
-                    # 6. 🐛 修复：特别处理常见模式，如 /category/*, /tag/*, /page/* 等
-                    path_patterns = ['category/', 'tag/', 'page/', 'post/', 'article/', 'item/', 'product/']
-                    for pattern in path_patterns:
-                        if path_part.lower().startswith(pattern):
-                            return True
+                # 简化逻辑：只要路径部分不为空且不是单独的'*'，就认为是特定路径
+                if path_part and path_part != '*':
+                    return True
 
         return False
 
