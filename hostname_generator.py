@@ -127,6 +127,13 @@ class SearXNGHostnamesGenerator:
                     },
                     "enabled": True
                 },
+                {
+                    "name": "bcaso - Computer Science Whitelist",
+                    "url": "https://raw.githubusercontent.com/bcaso/Computer-Science-Whitelist/refs/heads/main/whitelists/whitelists_combined.txt",
+                    "action": "high_priority",
+                    "format": "ublock",
+                    "enabled": True
+                },
             ],
 
             # 自定义规则配置（从文件读取）
