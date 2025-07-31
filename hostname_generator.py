@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-SearXNG Hostnames 规则生成器 - 完善版 (支持 v2ray 格式 - 保持原始结构)
+SearXNG Hostnames 规则生成器 - 完善版 (支持 v2ray 格式 - 保持原始结构 + CSV 格式支持)
 - 支持低优先级/高优先级/替换规则从外部文件读取
 - 白名单功能改为自动分类语法功能，支持 remove:baidu.com 等语法
 - 修复：skip 规则只影响数据源处理，不阻止明确的自动分类规则
 - 新增：支持 v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)
 - 修正：保持原始域名结构，不移除 www. 等前缀
+- 🆕 新增：支持 CSV 格式解析，可指定特定列读取 Hostname
 
 pip install requests pyyaml argparse
 """
@@ -14,6 +15,7 @@ import requests
 import yaml
 import json
 import re
+import csv
 from urllib.parse import urlparse
 from typing import Dict, List, Set, Union, Tuple
 import argparse
@@ -47,6 +49,9 @@ class SearXNGHostnamesGenerator:
             'skipped_from_sources': 0,  # 从数据源跳过的域名数量
             'skip_overridden': 0,  # skip 规则被其他规则覆盖的数量
             'v2ray_with_tags': 0,  # 带标签的 v2ray 规则数量
+            'csv_parsed_rows': 0,  # CSV 解析的行数
+            'csv_invalid_urls': 0,  # CSV 中无效 URL 的数量
+            'csv_extracted_domains': 0,  # CSV 中成功提取的域名数量
         }
         # 记录每个类别的域名数量
         self.category_domain_counts = {
@@ -112,6 +117,19 @@ class SearXNGHostnamesGenerator:
                     "url": "https://raw.githubusercontent.com/obgnail/chinese-internet-is-dead/master/blocklist.txt",
                     "action": "remove",
                     "format": "ublock",
+                    "enabled": True
+                },
+                {
+                    "name": "timqian - Chinese Independent Blogs",
+                    "url": "https://raw.githubusercontent.com/timqian/chinese-independent-blogs/refs/heads/master/blogs-original.csv",
+                    "action": "high_priority",
+                    "format": "csv",
+                    "csv_config": {
+                        "column": "Address",
+                        "has_header": True,
+                        "delimiter": ",",
+                        "encoding": "utf-8"
+                    },
                     "enabled": True
                 },
             ],
@@ -239,6 +257,210 @@ class SearXNGHostnamesGenerator:
                 self._deep_merge(base_dict[key], value)
             else:
                 base_dict[key] = value
+
+    def extract_hostname_from_url(self, url_string: str) -> str:
+        """
+        从 URL 字符串中提取 hostname
+
+        Args:
+            url_string: URL 字符串
+
+        Returns:
+            提取的 hostname，如果失败返回 None
+        """
+        if not url_string:
+            return None
+
+        url_string = url_string.strip()
+
+        # 如果没有协议，尝试添加 http://
+        if not url_string.startswith(('http://', 'https://', 'ftp://')):
+            # 检查是否看起来像一个完整的域名
+            if '.' in url_string and not url_string.startswith('/'):
+                url_string = 'http://' + url_string
+            else:
+                return None
+
+        try:
+            parsed = urlparse(url_string)
+            hostname = parsed.netloc
+
+            if not hostname:
+                return None
+
+            # 移除端口号
+            if ':' in hostname:
+                hostname = hostname.split(':')[0]
+
+            # 验证域名格式
+            if self.is_valid_domain(hostname):
+                return hostname.lower()
+
+        except Exception as e:
+            print(f"  ❌ URL 解析失败: {url_string} - {e}")
+
+        return None
+
+    def parse_csv_rule(self, csv_row: List[str], csv_config: Dict, row_num: int) -> Tuple[str, str]:
+        """
+        解析 CSV 行，提取域名
+
+        Args:
+            csv_row: CSV 行数据列表
+            csv_config: CSV 配置
+            row_num: 行号（用于错误信息）
+
+        Returns:
+            (域名或 None, 忽略原因)
+        """
+        try:
+            # 获取目标列的值
+            column = csv_config.get("column")
+            column_index = csv_config.get("column_index")
+
+            target_value = None
+
+            if column_index is not None:
+                # 使用列索引
+                if 0 <= column_index < len(csv_row):
+                    target_value = csv_row[column_index].strip()
+                else:
+                    return None, f"列索引 {column_index} 超出范围 (行 {row_num})"
+            elif column:
+                # 使用列名（需要 headers）
+                return None, "使用列名需要在头部信息中查找，这应该在调用方处理"
+            else:
+                return None, "未指定列名或列索引"
+
+            if not target_value:
+                return None, "目标列值为空"
+
+            # 从 URL 中提取 hostname
+            hostname = self.extract_hostname_from_url(target_value)
+            if hostname:
+                return hostname, None
+            else:
+                return None, f"无法从 URL 提取域名: {target_value}"
+
+        except Exception as e:
+            return None, f"解析 CSV 行时出错 (行 {row_num}): {e}"
+
+    def load_csv_rules_from_file(self, file_path: str, csv_config: Dict, action: str) -> Tuple[Set[str], Dict[str, str], Dict]:
+        """
+        从 CSV 文件加载规则
+
+        Args:
+            file_path: CSV 文件路径
+            csv_config: CSV 配置
+            action: 动作类型
+
+        Returns:
+            (域名集合, 替换规则字典, 统计信息)
+        """
+        domains = set()
+        replace_rules = {}
+        stats = {
+            'total_rules': 0,
+            'parsed_domains': 0,
+            'invalid_domains': 0,
+            'ignored_comments': 0,
+            'csv_parsed_rows': 0,
+            'csv_invalid_urls': 0,
+            'csv_extracted_domains': 0
+        }
+
+        # CSV 配置默认值
+        has_header = csv_config.get("has_header", True)
+        delimiter = csv_config.get("delimiter", ",")
+        encoding = csv_config.get("encoding", "utf-8")
+        column = csv_config.get("column")
+        column_index = csv_config.get("column_index")
+
+        try:
+            with open(file_path, 'r', encoding=encoding) as f:
+                csv_reader = csv.reader(f, delimiter=delimiter)
+
+                headers = None
+                actual_column_index = None
+
+                for row_num, row in enumerate(csv_reader, 1):
+                    if not row or all(cell.strip() == '' for cell in row):
+                        continue  # 跳过空行
+
+                    stats['total_rules'] += 1
+
+                    # 处理头部行
+                    if has_header and row_num == 1:
+                        headers = [cell.strip() for cell in row]
+
+                        # 如果指定了列名，找到对应的索引
+                        if column:
+                            try:
+                                actual_column_index = headers.index(column)
+                                print(f"  📍 找到目标列 '{column}' 位于索引 {actual_column_index}")
+                            except ValueError:
+                                print(f"  ❌ 未找到指定的列名 '{column}'")
+                                print(f"  📋 可用的列名: {', '.join(headers)}")
+                                return domains, replace_rules, stats
+                        elif column_index is not None:
+                            actual_column_index = column_index
+                            if actual_column_index < len(headers):
+                                print(f"  📍 使用列索引 {actual_column_index}: '{headers[actual_column_index]}'")
+                            else:
+                                print(f"  ❌ 列索引 {actual_column_index} 超出范围")
+                                return domains, replace_rules, stats
+
+                        continue  # 跳过头部行，不解析数据
+
+                    # 如果没有设置实际列索引，使用配置的列索引
+                    if actual_column_index is None and column_index is not None:
+                        actual_column_index = column_index
+
+                    stats['csv_parsed_rows'] += 1
+
+                    try:
+                        # 解析 CSV 行
+                        if actual_column_index is not None:
+                            if actual_column_index < len(row):
+                                url_value = row[actual_column_index].strip()
+                                if url_value:
+                                    domain = self.extract_hostname_from_url(url_value)
+                                    if domain:
+                                        domains.add(domain)
+                                        stats['parsed_domains'] += 1
+                                        stats['csv_extracted_domains'] += 1
+
+                                        # 显示一些解析样本
+                                        if stats['csv_extracted_domains'] <= 5:
+                                            print(f"    ✅ CSV 解析: {url_value} -> {domain}")
+                                    else:
+                                        stats['csv_invalid_urls'] += 1
+                                        if stats['csv_invalid_urls'] <= 3:
+                                            print(f"    ❌ 无效 URL: {url_value}")
+                                else:
+                                    stats['invalid_domains'] += 1
+                            else:
+                                stats['invalid_domains'] += 1
+                                if stats['invalid_domains'] <= 3:
+                                    print(f"    ❌ 行 {row_num} 列索引超出范围")
+                        else:
+                            stats['invalid_domains'] += 1
+                            print(f"    ❌ 未设置有效的列索引")
+
+                    except Exception as e:
+                        print(f"    ❌ 解析第 {row_num} 行时出错: {e}")
+                        stats['invalid_domains'] += 1
+
+                print(f"    ✅ CSV 解析完成: {stats['csv_extracted_domains']} 个有效域名")
+                if stats['csv_invalid_urls'] > 0:
+                    print(f"    ⚠️  忽略了 {stats['csv_invalid_urls']} 个无效 URL")
+
+        except FileNotFoundError:
+            print(f"    ❌ 文件不存在: {file_path}")
+        except Exception as e:
+            print(f"    ❌ 读取 CSV 文件失败: {e}")
+
+        return domains, replace_rules, stats
 
     def parse_v2ray_rule(self, rule: str) -> Tuple[str, str]:
         """
@@ -543,14 +765,15 @@ class SearXNGHostnamesGenerator:
 
         return rules
 
-    def load_custom_rules_from_file(self, file_path: str, format_type: str, action: str) -> Tuple[Set[str], Dict[str, str], Dict]:
+    def load_custom_rules_from_file(self, file_path: str, format_type: str, action: str, csv_config: Dict = None) -> Tuple[Set[str], Dict[str, str], Dict]:
         """
-        从文件加载自定义规则
+        从文件加载自定义规则，支持 CSV 格式
 
         Args:
             file_path: 文件路径
-            format_type: 格式类型 (domain, regex, ublock, v2ray, replace)
+            format_type: 格式类型 (domain, regex, ublock, v2ray, replace, csv)
             action: 动作类型 (remove, low_priority, high_priority, replace)
+            csv_config: CSV 配置（当 format_type 为 csv 时使用）
 
         Returns:
             (域名集合, 替换规则字典, 统计信息)
@@ -562,10 +785,23 @@ class SearXNGHostnamesGenerator:
             'parsed_domains': 0,
             'invalid_domains': 0,
             'ignored_comments': 0,
-            'v2ray_with_tags': 0
+            'v2ray_with_tags': 0,
+            'csv_parsed_rows': 0,
+            'csv_invalid_urls': 0,
+            'csv_extracted_domains': 0
         }
 
         try:
+            # CSV 格式特殊处理
+            if format_type == "csv":
+                if not csv_config:
+                    print(f"  ❌ CSV 格式需要 csv_config 配置")
+                    return domains, replace_rules, stats
+
+                print(f"  📁 正在解析 CSV 文件: {file_path}")
+                return self.load_csv_rules_from_file(file_path, csv_config, action)
+
+            # 其他格式的处理逻辑保持不变
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
@@ -1112,14 +1348,15 @@ class SearXNGHostnamesGenerator:
 
         return None, "无法解析规则格式"
 
-    def fetch_domain_list(self, url: str, format_type: str = "domain", source_name: str = None) -> Tuple[Set[str], Dict]:
+    def fetch_domain_list(self, url: str, format_type: str = "domain", source_name: str = None, csv_config: Dict = None) -> Tuple[Set[str], Dict]:
         """
-        从URL获取域名列表
+        从URL获取域名列表，支持 CSV 格式
 
         Args:
             url: 域名列表URL
-            format_type: 格式类型，"domain", "ublock", 或 "v2ray"
+            format_type: 格式类型，"domain", "ublock", "v2ray", 或 "csv"
             source_name: 数据源名称（用于自动分类）
+            csv_config: CSV 配置（当 format_type 为 csv 时使用）
 
         Returns:
             (域名集合, 统计信息)
@@ -1134,7 +1371,10 @@ class SearXNGHostnamesGenerator:
             'ignored_comments': 0,
             'auto_classified': 0,  # 自动分类处理的数量
             'skipped_domains': 0,   # 跳过的域名数量
-            'v2ray_with_tags': 0   # v2ray 带标签的规则数量
+            'v2ray_with_tags': 0,   # v2ray 带标签的规则数量
+            'csv_parsed_rows': 0,
+            'csv_invalid_urls': 0,
+            'csv_extracted_domains': 0
         }
 
         retry_count = self.config["request_config"]["retry_count"]
@@ -1151,6 +1391,14 @@ class SearXNGHostnamesGenerator:
 
                 response = requests.get(url, timeout=timeout, headers=headers)
                 response.raise_for_status()
+
+                # CSV 格式特殊处理
+                if format_type == "csv":
+                    if not csv_config:
+                        print(f"  ❌ CSV 格式需要 csv_config 配置")
+                        return domains, stats
+
+                    return self._parse_csv_from_response(response.text, csv_config, source_name, stats)
 
                 # 记录一些被忽略的规则用于调试
                 ignored_samples = []
@@ -1288,6 +1536,126 @@ class SearXNGHostnamesGenerator:
                     time.sleep(retry_delay)
                 else:
                     print(f"放弃获取 {url}")
+
+        return domains, stats
+
+    def _parse_csv_from_response(self, csv_content: str, csv_config: Dict, source_name: str, stats: Dict) -> Tuple[Set[str], Dict]:
+        """
+        从 HTTP 响应内容解析 CSV 格式的域名
+
+        Args:
+            csv_content: CSV 内容字符串
+            csv_config: CSV 配置
+            source_name: 数据源名称
+            stats: 统计信息字典
+
+        Returns:
+            (域名集合, 统计信息)
+        """
+        domains = set()
+
+        # CSV 配置默认值
+        has_header = csv_config.get("has_header", True)
+        delimiter = csv_config.get("delimiter", ",")
+        column = csv_config.get("column")
+        column_index = csv_config.get("column_index")
+
+        try:
+            csv_reader = csv.reader(csv_content.strip().split('\n'), delimiter=delimiter)
+
+            headers = None
+            actual_column_index = None
+            skip_samples = []  # 跳过的域名样本
+            accepted_samples = []  # 接受的域名样本
+
+            for row_num, row in enumerate(csv_reader, 1):
+                if not row or all(cell.strip() == '' for cell in row):
+                    continue  # 跳过空行
+
+                stats['total_rules'] += 1
+
+                # 处理头部行
+                if has_header and row_num == 1:
+                    headers = [cell.strip() for cell in row]
+
+                    # 如果指定了列名，找到对应的索引
+                    if column:
+                        try:
+                            actual_column_index = headers.index(column)
+                            print(f"  📍 CSV 找到目标列 '{column}' 位于索引 {actual_column_index}")
+                        except ValueError:
+                            print(f"  ❌ CSV 未找到指定的列名 '{column}'")
+                            print(f"  📋 CSV 可用的列名: {', '.join(headers)}")
+                            return domains, stats
+                    elif column_index is not None:
+                        actual_column_index = column_index
+                        if actual_column_index < len(headers):
+                            print(f"  📍 CSV 使用列索引 {actual_column_index}: '{headers[actual_column_index]}'")
+                        else:
+                            print(f"  ❌ CSV 列索引 {actual_column_index} 超出范围")
+                            return domains, stats
+
+                    continue  # 跳过头部行
+
+                # 如果没有设置实际列索引，使用配置的列索引
+                if actual_column_index is None and column_index is not None:
+                    actual_column_index = column_index
+
+                stats['csv_parsed_rows'] += 1
+
+                try:
+                    # 解析 CSV 行
+                    if actual_column_index is not None and actual_column_index < len(row):
+                        url_value = row[actual_column_index].strip()
+                        if url_value:
+                            domain = self.extract_hostname_from_url(url_value)
+                            if domain:
+                                # 检查是否应该从数据源跳过此域名
+                                should_skip, skip_reason = self.should_skip_domain_from_source(domain, source_name)
+                                if should_skip:
+                                    stats['skipped_domains'] += 1
+                                    if len(skip_samples) < 3:
+                                        skip_samples.append(f"{url_value} -> {domain} ({skip_reason})")
+                                else:
+                                    if domain not in domains:
+                                        domains.add(domain)
+                                        stats['parsed_domains'] += 1
+                                        stats['csv_extracted_domains'] += 1
+
+                                        # 显示一些解析样本
+                                        if len(accepted_samples) < 5:
+                                            accepted_samples.append(f"{url_value} -> {domain}")
+                                    else:
+                                        stats['duplicate_domains'] += 1
+                            else:
+                                stats['csv_invalid_urls'] += 1
+                        else:
+                            stats['invalid_domains'] += 1
+                    else:
+                        stats['invalid_domains'] += 1
+
+                except Exception as e:
+                    print(f"    ❌ CSV 解析第 {row_num} 行时出错: {e}")
+                    stats['invalid_domains'] += 1
+
+            print(f"  ✅ CSV 解析完成: {stats['csv_extracted_domains']} 个有效域名")
+
+            # 显示样本
+            if accepted_samples:
+                print(f"  - CSV 接受的域名样本:")
+                for sample in accepted_samples:
+                    print(f"    ✅ {sample}")
+
+            if skip_samples:
+                print(f"  - CSV 跳过的域名样本:")
+                for sample in skip_samples:
+                    print(f"    ⏭️ {sample}")
+
+            if stats['csv_invalid_urls'] > 0:
+                print(f"  ⚠️  CSV 忽略了 {stats['csv_invalid_urls']} 个无效 URL")
+
+        except Exception as e:
+            print(f"    ❌ 解析 CSV 内容失败: {e}")
 
         return domains, stats
 
@@ -1980,7 +2348,10 @@ class SearXNGHostnamesGenerator:
             'auto_added': 0,
             'skipped_from_sources': 0,
             'skip_overridden': 0,
-            'v2ray_with_tags': 0
+            'v2ray_with_tags': 0,
+            'csv_parsed_rows': 0,
+            'csv_invalid_urls': 0,
+            'csv_extracted_domains': 0
         }
 
         # 从在线源收集域名
@@ -1990,9 +2361,10 @@ class SearXNGHostnamesGenerator:
 
             print(f"\n处理数据源: {source['name']}")
             format_type = source.get("format", "domain")
+            csv_config = source.get("csv_config") if format_type == "csv" else None
             print(f"格式类型: {format_type}")
 
-            domains, source_stats = self.fetch_domain_list(source["url"], format_type, source["name"])
+            domains, source_stats = self.fetch_domain_list(source["url"], format_type, source["name"], csv_config)
 
             # 累加统计信息
             for key in self.stats:
@@ -2040,13 +2412,14 @@ class SearXNGHostnamesGenerator:
                 file_path = source["file"]
                 format_type = source.get("format", "domain")
                 action = source.get("action", "remove")
+                csv_config = source.get("csv_config") if format_type == "csv" else None
 
                 if not os.path.exists(file_path):
                     print(f"  ❌ 文件不存在: {file_path}")
                     continue
 
                 domains, replace_rules, source_stats = self.load_custom_rules_from_file(
-                    file_path, format_type, action
+                    file_path, format_type, action, csv_config
                 )
 
                 # 累加统计信息
@@ -2054,6 +2427,9 @@ class SearXNGHostnamesGenerator:
                 self.stats['parsed_domains'] += source_stats['parsed_domains']
                 self.stats['invalid_domains'] += source_stats['invalid_domains']
                 self.stats['ignored_comments'] += source_stats['ignored_comments']
+                self.stats['csv_parsed_rows'] += source_stats.get('csv_parsed_rows', 0)
+                self.stats['csv_invalid_urls'] += source_stats.get('csv_invalid_urls', 0)
+                self.stats['csv_extracted_domains'] += source_stats.get('csv_extracted_domains', 0)
 
                 # 将域名添加到相应类别
                 if action in categorized_domains:
@@ -2132,7 +2508,12 @@ class SearXNGHostnamesGenerator:
             print(f"📁 自定义规则文件:")
             print(f"   - 启用的文件源: {len(enabled_sources)} 个")
             for source in enabled_sources:
-                print(f"     • {source['name']}: {source['file']} ({source.get('action', 'remove')}) - 格式: {source.get('format', 'domain')}")
+                format_info = f" - 格式: {source.get('format', 'domain')}"
+                if source.get('format') == 'csv':
+                    csv_config = source.get('csv_config', {})
+                    column_info = csv_config.get('column', f"索引{csv_config.get('column_index', '未指定')}")
+                    format_info += f" (列: {column_info})"
+                print(f"     • {source['name']}: {source['file']} ({source.get('action', 'remove')}){format_info}")
         else:
             print(f"📁 自定义规则文件功能已禁用")
 
@@ -2352,11 +2733,12 @@ class SearXNGHostnamesGenerator:
         """
         运行生成器
         """
-        print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray 格式 - 保持原始结构)")
+        print("SearXNG Hostnames 规则生成器启动 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray 格式 - 保持原始结构 + CSV 支持)")
         print("🔧 修复版本：skip 规则只影响数据源处理，不阻止明确的自动分类规则")
         print("🆕 新增功能：支持 v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)")
         print("🔧 修正功能：保持原始域名结构，不移除 www. 等前缀")
-        print("=" * 90)
+        print("🆕 CSV 支持：可从 CSV 文件指定列读取 Hostname URL 并自动提取域名")
+        print("=" * 110)
 
         try:
             # 生成规则
@@ -2428,13 +2810,22 @@ class SearXNGHostnamesGenerator:
         print(f"  - 🔄 skip 规则被覆盖: {self.stats.get('skip_overridden', 0):,}")
         if self.stats.get('v2ray_with_tags', 0) > 0:
             print(f"  - 📝 v2ray 带标签规则: {self.stats.get('v2ray_with_tags', 0):,}")
+        if self.stats.get('csv_parsed_rows', 0) > 0:
+            print(f"  - 📊 CSV 解析行数: {self.stats.get('csv_parsed_rows', 0):,}")
+            print(f"  - 📊 CSV 提取域名: {self.stats.get('csv_extracted_domains', 0):,}")
+            print(f"  - 📊 CSV 无效 URL: {self.stats.get('csv_invalid_urls', 0):,}")
 
         print(f"\n📁 输出目录: {self.config['output']['directory']}")
 
         print(f"\n📡 数据源:")
         for source in self.config["sources"]:
             if source.get("enabled", True):
-                print(f"  ✅ {source['name']} ({source.get('format', 'domain')})")
+                format_info = f"({source.get('format', 'domain')})"
+                if source.get('format') == 'csv':
+                    csv_config = source.get('csv_config', {})
+                    column_info = csv_config.get('column', f"索引{csv_config.get('column_index', '?')}")
+                    format_info = f"(csv: {column_info})"
+                print(f"  ✅ {source['name']} {format_info}")
             else:
                 print(f"  ❌ {source['name']} (已禁用)")
 
@@ -2471,6 +2862,10 @@ class SearXNGHostnamesGenerator:
             for source in enabled_sources:
                 file_exists = "✅" if os.path.exists(source['file']) else "❌"
                 format_info = f" - 格式: {source.get('format', 'domain')}"
+                if source.get('format') == 'csv':
+                    csv_config = source.get('csv_config', {})
+                    column_info = csv_config.get('column', f"索引{csv_config.get('column_index', '?')}")
+                    format_info += f" (列: {column_info})"
                 print(f"    {file_exists} {source['name']}: {source['file']} ({source.get('action', 'remove')}){format_info}")
         else:
             print(f"  - 状态: 已禁用")
@@ -2542,6 +2937,14 @@ class SearXNGHostnamesGenerator:
         print(f"  - 只移除明确的协议和端口信息")
         print(f"  - v2ray 格式域名完全保持原始结构")
 
+        print(f"\n🆕 CSV 格式支持:")
+        print(f"  - 可从 CSV 文件的指定列读取 URL")
+        print(f"  - 自动从 URL 中提取域名(hostname)")
+        print(f"  - 支持按列名或列索引指定目标列")
+        print(f"  - 支持自定义分隔符和编码")
+        if self.stats.get('csv_extracted_domains', 0) > 0:
+            print(f"  - 本次从 CSV 成功提取了 {self.stats.get('csv_extracted_domains', 0)} 个域名")
+
         print(f"\n📁 支持的文件格式:")
         print(f"  - domain: 纯域名格式 (每行一个域名)")
         print(f"  - regex: 正则表达式格式 (直接使用的正则)")
@@ -2549,6 +2952,15 @@ class SearXNGHostnamesGenerator:
         print(f"  - v2ray: v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)")
         print(f"  - replace: 替换格式 (old_domain=new_domain)")
         print(f"  - classify: 自动分类格式 (action:domain)")
+        print(f"  - 🆕 csv: CSV 格式 (从指定列提取 URL 并转换为域名)")
+
+        print(f"\n🔧 CSV 格式配置示例:")
+        print(f"  csv_config:")
+        print(f"    column: 'Address'           # 使用列名")
+        print(f"    # column_index: 1           # 或使用列索引")
+        print(f"    has_header: true            # 是否有标题行")
+        print(f"    delimiter: ','              # CSV 分隔符")
+        print(f"    encoding: 'utf-8'           # 文件编码")
 
         print(f"\n🔧 自动分类语法示例:")
         print(f"  - skip:csdn.net              # 从数据源跳过（但不阻止其他规则）")
@@ -2571,7 +2983,7 @@ class SearXNGHostnamesGenerator:
 
 def create_sample_config():
     """
-    创建示例配置文件 (支持 v2ray 格式，保持原始结构)
+    创建示例配置文件 (支持 v2ray 格式，保持原始结构，新增 CSV 支持)
     """
     sample_config = {
         "sources": [
@@ -2601,6 +3013,19 @@ def create_sample_config():
                 "url": "https://example.com/v2ray-rules.txt",
                 "action": "remove",
                 "format": "v2ray",
+                "enabled": False
+            },
+            {
+                "name": "Example CSV from URL",
+                "url": "https://example.com/blog_list.csv",
+                "action": "remove",
+                "format": "csv",
+                "csv_config": {
+                    "column": "Address",
+                    "has_header": True,
+                    "delimiter": ",",
+                    "encoding": "utf-8"
+                },
                 "enabled": False
             }
         ],
@@ -2641,6 +3066,19 @@ def create_sample_config():
                     "file": "./custom_v2ray.txt",
                     "action": "remove",
                     "format": "v2ray",
+                    "enabled": False
+                },
+                {
+                    "name": "Custom CSV Rules",
+                    "file": "./blog_list.csv",
+                    "action": "remove",
+                    "format": "csv",
+                    "csv_config": {
+                        "column": "Address",
+                        "has_header": True,
+                        "delimiter": ",",
+                        "encoding": "utf-8"
+                    },
                     "enabled": False
                 }
             ]
@@ -2821,10 +3259,24 @@ domain:academic.example.com:@academic:@high_priority  # 复合标签
 # domain:example.com  # 这是注释
 """)
 
+    # 🆕 创建示例 CSV 文件
+    with open("blog_list.csv", "w", encoding="utf-8") as f:
+        f.write("""Introduction,Address,RSS feed,tags
+透明创业实验,https://blog.t9t.io,https://blog.t9t.io/atom.xml,创业; 编程; 开源
+阮一峰的网络日志,https://www.ruanyifeng.com/blog/,https://www.ruanyifeng.com/blog/atom.xml,技术; 编程
+酷壳 – CoolShell,https://coolshell.cn,https://coolshell.cn/feed,技术; 编程
+V2EX,https://www.v2ex.com,https://www.v2ex.com/index.xml,社区; 技术
+少数派,https://sspai.com,https://sspai.com/feed,效率; 工具
+小众软件,https://www.appinn.com,https://www.appinn.com/feed/,软件; 工具
+异次元软件世界,https://www.iplaysoft.com,https://www.iplaysoft.com/feed,软件; 工具
+知乎日报,https://daily.zhihu.com,https://daily.zhihu.com/rss,新闻; 知识
+""")
+
     print("示例配置文件已创建: config.yaml")
     print("示例自动分类文件已创建: auto_classify.txt")
     print("示例自定义规则文件已创建: custom_remove.txt, custom_replace.txt")
     print("🆕 示例 v2ray 规则文件已创建: custom_v2ray.txt")
+    print("🆕 示例 CSV 文件已创建: blog_list.csv")
 
     print("\n🆕 v2ray 格式说明:")
     print("  - domain:example.com         # 匹配域名及其所有子域名")
@@ -2838,6 +3290,20 @@ domain:academic.example.com:@academic:@high_priority  # 复合标签
     print("  - sub.example.com 会保持完整的子域名结构")
     print("  - 只有明确的协议(http://)和端口号(:8080)才会被移除")
     print("  - v2ray 格式中的标签(:@tag)会被识别但不影响域名本身")
+
+    print("\n🆕 CSV 格式支持说明:")
+    print("  - 可从 CSV 文件指定列读取 URL")
+    print("  - 自动从 URL 提取域名(hostname)")
+    print("  - blog_list.csv 示例文件包含了多个博客 URL")
+    print("  - 配置中指定 'Address' 列作为 URL 源")
+    print("  - 支持有/无标题行、自定义分隔符等配置")
+
+    print("\n🔧 CSV 配置选项:")
+    print("  - column: 'Address'           # 使用列名(需要标题行)")
+    print("  - column_index: 1             # 使用列索引(从0开始)")
+    print("  - has_header: true            # 是否有标题行")
+    print("  - delimiter: ','              # CSV 分隔符")
+    print("  - encoding: 'utf-8'           # 文件编码")
 
     print("\n🔄 修复后的自动分类语法说明:")
     print("  - skip:domain.com            # 只从数据源跳过，不阻止其他规则")
@@ -2859,10 +3325,11 @@ domain:academic.example.com:@academic:@high_priority  # 复合标签
     print("  - v2ray: v2ray 格式 (domain:example.com, full:example.com, domain:example.com:@tag)")
     print("  - replace: 替换格式，old_domain=new_domain")
     print("  - classify: 自动分类格式，action:domain")
+    print("  - 🆕 csv: CSV 格式，从指定列提取 URL 并转换为域名")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray格式 - 保持原始结构) - Skip 修复版")
+    parser = argparse.ArgumentParser(description="SearXNG Hostnames 规则生成器 (完整版 - 自动分类 + 自定义文件 + TLD优化 + v2ray格式 - 保持原始结构 + CSV支持) - Skip 修复版")
     parser.add_argument("-c", "--config", help="配置文件路径")
     parser.add_argument("--create-config", action="store_true", help="创建示例配置文件和示例规则文件")
     parser.add_argument("--single-regex", action="store_true", help="强制生成高级TLD优化的单行正则表达式")
