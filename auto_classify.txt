@@ -38,6 +38,7 @@ high_priority:reddit.com
 high_priority:wikipedia.org
 high_priority:arxiv.org
 high_priority:scholar.google.com
+high_priority:ncbi.nlm.nih.gov
 
 # CN 权威类
 high_priority:edu.cn
