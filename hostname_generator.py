@@ -136,6 +136,41 @@ class SearXNGHostnamesGenerator:
                     "format": "ublock",
                     "enabled": True
                 },
+                {
+                    "name": "hezhijie0327 - Geosite2Domain - dev",
+                    "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-dev.txt",
+                    "action": "high_priority",
+                    "format": "v2ray",
+                    "enabled": True
+                },
+                {
+                    "name": "hezhijie0327 - Geosite2Domain - dev-cn",
+                    "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-dev-cn.txt",
+                    "action": "low_priority",
+                    "format": "v2ray",
+                    "enabled": True
+                },
+                {
+                    "name": "hezhijie0327 - Geosite2Domain - orgs",
+                    "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-orgs.txt",
+                    "action": "high_priority",
+                    "format": "v2ray",
+                    "enabled": True
+                },
+                {
+                    "name": "hezhijie0327 - Geosite2Domain - scholar-!cn",
+                    "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-scholar-!cn.txt",
+                    "action": "high_priority",
+                    "format": "v2ray",
+                    "enabled": True
+                },
+                {
+                    "name": "hezhijie0327 - Geosite2Domain - scholar-cn",
+                    "url": "https://raw.githubusercontent.com/hezhijie0327/Geosite2Domain/refs/heads/main/category/category-scholar-cn.txt",
+                    "action": "high_priority",
+                    "format": "v2ray",
+                    "enabled": True
+                },
             ],
 
             # 自定义规则配置（从文件读取）
