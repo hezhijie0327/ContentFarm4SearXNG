@@ -40,10 +40,6 @@ high_priority:arxiv.org
 high_priority:scholar.google.com
 high_priority:ncbi.nlm.nih.gov
 
-# CN 权威类
-high_priority:edu.cn
-high_priority:gov.cn
-
 # =============================================================================
 # 低优先级规则 (Low Priority Rules)  
 # =============================================================================
