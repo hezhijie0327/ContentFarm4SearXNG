@@ -46,6 +46,7 @@ high_priority:ncbi.nlm.nih.gov
 
 # 论坛/博客类
 low_priority:csdn.net
+low_priority:baijiahao.baidu.com
 
 # =============================================================================
 # 移除规则 (Remove Rules)
