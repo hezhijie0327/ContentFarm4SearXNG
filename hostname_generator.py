@@ -117,6 +117,20 @@ class SearXNGHostnamesGenerator:
                     "enabled": True
                 },
                 {
+                    "name": "insomnimus - SEO Garbage",
+                    "url": "https://raw.githubusercontent.com/insomnimus/seo-garbage/main/list.txt",
+                    "action": "remove",
+                    "format": "ublock",
+                    "enabled": True
+                },
+                {
+                    "name": "quenhus - uBlock-Origin-dev-filter",
+                    "url": "https://raw.githubusercontent.com/quenhus/uBlock-Origin-dev-filter/main/dist/other_format/domains/all.txt",
+                    "action": "remove",
+                    "format": "domain",
+                    "enabled": True
+                },
+                {
                     "name": "timqian - Chinese Independent Blogs",
                     "url": "https://raw.githubusercontent.com/timqian/chinese-independent-blogs/refs/heads/master/blogs-original.csv",
                     "action": "high_priority",
