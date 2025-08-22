@@ -120,7 +120,7 @@ class SearXNGHostnamesGenerator:
                     "name": "insomnimus - SEO Garbage",
                     "url": "https://raw.githubusercontent.com/insomnimus/seo-garbage/main/list.txt",
                     "action": "remove",
-                    "format": "ublock",
+                    "format": "domain",
                     "enabled": True
                 },
                 {
