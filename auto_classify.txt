@@ -19,6 +19,8 @@ skip:baidu.com
 skip:csdn.net
 # 过度匹配 @content-farm-terminator/extra-content-farms
 skip:dingtalk.com
+# 过度匹配 @quenhus/uBlock-Origin-dev-filter
+skip:npmmirror.com
 
 # =============================================================================
 # 高优先级规则 (High Priority Rules)
