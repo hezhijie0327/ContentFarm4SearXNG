@@ -36,6 +36,7 @@ high_priority:linux.do
 high_priority:cnblogs.com
 high_priority:reddit.com
 high_priority:sspai.com
+high_priority:medium.com
 
 # 百科/学术类
 high_priority:wikipedia.org
