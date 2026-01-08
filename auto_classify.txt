@@ -37,6 +37,7 @@ high_priority:cnblogs.com
 high_priority:reddit.com
 high_priority:sspai.com
 high_priority:medium.com
+high_priority:innei.in
 
 # 百科/学术类
 high_priority:wikipedia.org
