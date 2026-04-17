@@ -233,6 +233,7 @@ class SearXNGHostnamesGenerator:
                     "replace": "rewrite-hosts.yml",
                     "remove": "remove-hosts.yml",
                     "low_priority": "low-priority-hosts.yml",
+                    "low_priority_all": "low-priority-hosts-all.yml",
                     "high_priority": "high-priority-hosts.yml",
                     "main_config": "hostnames-config.yml"
                 }
@@ -2485,6 +2486,7 @@ class SearXNGHostnamesGenerator:
         self.category_domain_counts = {
             'remove': 0,
             'low_priority': 0,
+            'low_priority_all': 0,
             'high_priority': 0,
             'replace': 0
         }
@@ -2725,6 +2727,14 @@ class SearXNGHostnamesGenerator:
             # 创建空低优先级规则列表，确保文件被创建
             rules["low_priority"] = []
 
+        # 低优先级 + 移除组合规则 (列表格式)
+        print(f"\n生成低优先级(含移除)组合规则...")
+        low_priority_all_rules = sorted(set(remove_rules + low_priority_rules))
+        rules["low_priority_all"] = low_priority_all_rules
+        self.category_domain_counts["low_priority_all"] = len(
+            set(categorized_domains["remove"] | categorized_domains["low_priority"])
+        ) + fixed_remove_count + fixed_low_priority_count
+
         # 高优先级规则 (列表格式) - 使用优化的合并
         print(f"\n生成高优先级规则...")
         high_priority_rules = []
@@ -2775,7 +2785,7 @@ class SearXNGHostnamesGenerator:
         main_config = {"hostnames": {}}
 
         # 保存各类规则到单独文件 - 确保所有类别的文件都被创建
-        expected_rule_types = ["replace", "remove", "low_priority", "high_priority"]
+        expected_rule_types = ["replace", "remove", "low_priority", "low_priority_all", "high_priority"]
 
         for rule_type in expected_rule_types:
             if rule_type in files_config:

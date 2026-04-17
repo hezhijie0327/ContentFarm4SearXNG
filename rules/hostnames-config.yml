@@ -4,5 +4,6 @@
 hostnames:
   high_priority: high-priority-hosts.yml
   low_priority: low-priority-hosts.yml
+  low_priority_all: low-priority-hosts-all.yml
   remove: remove-hosts.yml
   replace: rewrite-hosts.yml
