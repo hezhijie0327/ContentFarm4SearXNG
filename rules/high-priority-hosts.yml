@@ -49,7 +49,7 @@
 - (.*\.)?(loj|rei)\.ac$
 - (.*\.)?(puming|wulu|yyy)\.zone$
 - (.*\.)?(wangyi\.ai|forums\.fast\.ai)$
-- (.*\.)?(wocai\.de|(b\.oxue|blog\.laoda)\.de)$
+- (.*\.)?(wocai\.de|(blog\.laoda|www\.oxue)\.de)$
 - (.*\.)?(writings\.sh|blog\.251\.sh)$
 - (.*\.)?(www\.hxkj|www\.iots)\.vip$
 - (.*\.)?(xzhsh\.ch|blog\.yuhang\.ch)$
