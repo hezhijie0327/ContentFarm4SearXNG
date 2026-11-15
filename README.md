@@ -1,5 +1,8 @@
 # ContentFarm4SearXNG
 
+[![License](https://img.shields.io/badge/License-Apache%202.0--Commons%20Clause-blue)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+
 ContentFarm4SearXNG 是一个为 SearXNG 搜索引擎生成主机名规则的 Python 工具。它从各种来源获取内容农场过滤列表，处理后生成分类的 YAML 规则文件，帮助 SearXNG 过滤低质量内容农场，同时优先显示可靠来源。开发规范见 [AGENTS.md](AGENTS.md)。
 
 ## 特性
