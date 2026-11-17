@@ -17,6 +17,25 @@ import sys
 import time
 import os
 from collections import OrderedDict, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+
+# 预编译正则，避免在逐域名循环中重复编译
+IP_RE = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
+DOMAIN_PART_RE = re.compile(r'[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?')
+SINGLE_CHAR_RE = re.compile(r'[a-zA-Z0-9]')
+INVALID_CHARS_RE = re.compile(r'[^\w.-]')
+
+
+class _CachedResponse:
+    """已预取内容的响应对象，接口与 requests.Response 所需部分一致。"""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str):
+        self.text = text
+
+    def raise_for_status(self) -> None:
+        pass
 
 class SearXNGHostnamesGenerator:
     def __init__(self, config_file: str = None, force_single_regex: bool = False):
@@ -31,6 +50,8 @@ class SearXNGHostnamesGenerator:
         self.force_single_regex = force_single_regex
         self.domains = set()
         self.auto_classify_rules = []  # 自动分类规则
+        self._auto_exact = {}  # 精确域名 -> (规则序号, 规则)
+        self._auto_wildcards = []  # (规则序号, 后缀, 规则)
         self.stats = {
             'total_rules': 0,
             'parsed_domains': 0,
@@ -164,7 +185,7 @@ class SearXNGHostnamesGenerator:
                 "sources": [
                     {
                         "name": "Auto Classify Rules",
-                        "file": "./auto_classify.txt",
+                        "file": "./custom/classify.txt",
                         "format": "classify",  # 支持 action:domain 语法
                         "enabled": True
                     },
@@ -228,7 +249,7 @@ class SearXNGHostnamesGenerator:
             # 输出配置
             "output": {
                 "mode": "separate_files",  # separate_files 或 single_file
-                "directory": "./rules/",
+                "directory": "./dist/",
                 "files": {
                     "replace": "rewrite-hosts.yml",
                     "remove": "remove-hosts.yml",
@@ -648,6 +669,44 @@ class SearXNGHostnamesGenerator:
             for action, count in stats.items():
                 print(f"    - {action}: {count} 个")
 
+        self._index_auto_classify_rules()
+
+    def _index_auto_classify_rules(self) -> None:
+        """
+        为自动分类规则建立索引：精确域名哈希表 + 通配符后缀列表。
+        保留规则原始顺序，以便与逐条扫描时的「第一条命中」语义一致。
+        """
+        self._auto_exact = {}
+        self._auto_wildcards = []
+        for index, rule in enumerate(self.auto_classify_rules):
+            action = rule['action']
+            if action not in ('remove', 'low_priority', 'high_priority', 'skip'):
+                continue
+            domain = rule['domain'].lower()
+            if domain.startswith('*.'):
+                self._auto_wildcards.append((index, domain[2:], rule))
+            elif domain not in self._auto_exact:
+                self._auto_exact[domain] = (index, rule)
+
+    def _match_auto_rule(self, domain: str, actions: Tuple[str, ...]):
+        """
+        返回第一条命中的规则（仅限指定动作），保持原始规则顺序。
+        """
+        domain_lower = domain.lower()
+        exact = self._auto_exact.get(domain_lower)
+        if exact and exact[1]['action'] not in actions:
+            exact = None
+
+        for index, suffix, rule in self._auto_wildcards:
+            if rule['action'] not in actions:
+                continue
+            if domain_lower == suffix or domain_lower.endswith('.' + suffix):
+                if exact is None or index < exact[0]:
+                    return rule
+                break
+
+        return exact[1] if exact else None
+
     def _parse_auto_classify_rule(self, rule_str: str) -> Dict:
         """
         解析自动分类规则
@@ -919,21 +978,9 @@ class SearXNGHostnamesGenerator:
         if not self.auto_classify_rules:
             return False, ""
 
-        domain_lower = domain.lower()
-
-        for rule in self.auto_classify_rules:
-            if rule['action'] == 'skip':
-                rule_domain = rule['domain'].lower()
-
-                # 支持通配符匹配
-                if rule_domain.startswith('*.'):
-                    # 通配符匹配子域名
-                    pattern_domain = rule_domain[2:]  # 移除 *.
-                    if domain_lower == pattern_domain or domain_lower.endswith('.' + pattern_domain):
-                        return True, f"自动分类跳过规则: {rule['domain']} (仅影响数据源处理)"
-                elif domain_lower == rule_domain:
-                    # 精确匹配
-                    return True, f"自动分类跳过规则: {rule['domain']} (仅影响数据源处理)"
+        rule = self._match_auto_rule(domain, ('skip',))
+        if rule:
+            return True, f"自动分类跳过规则: {rule['domain']} (仅影响数据源处理)"
 
         return False, ""
 
@@ -950,21 +997,9 @@ class SearXNGHostnamesGenerator:
         if not self.auto_classify_rules:
             return None, ""
 
-        domain_lower = domain.lower()
-
-        for rule in self.auto_classify_rules:
-            if rule['action'] in ['remove', 'low_priority', 'high_priority']:
-                rule_domain = rule['domain'].lower()
-
-                # 支持通配符匹配
-                if rule_domain.startswith('*.'):
-                    # 通配符匹配子域名
-                    pattern_domain = rule_domain[2:]  # 移除 *.
-                    if domain_lower == pattern_domain or domain_lower.endswith('.' + pattern_domain):
-                        return rule['action'], f"自动分类规则: {rule['domain']}"
-                elif domain_lower == rule_domain:
-                    # 精确匹配
-                    return rule['action'], f"自动分类规则: {rule['domain']}"
+        rule = self._match_auto_rule(domain, ('remove', 'low_priority', 'high_priority'))
+        if rule:
+            return rule['action'], f"自动分类规则: {rule['domain']}"
 
         return None, ""
 
@@ -1346,6 +1381,44 @@ class SearXNGHostnamesGenerator:
             # 默认情况，保持原始动作
             return source_action
 
+    def _download_text(self, url: str) -> str:
+        """
+        下载单个 URL 的文本内容，失败返回 None（带重试）。
+        """
+        timeout = self.config["request_config"]["timeout"]
+        retry_count = self.config["request_config"]["retry_count"]
+        retry_delay = self.config["request_config"]["retry_delay"]
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+        for attempt in range(retry_count):
+            try:
+                response = requests.get(url, timeout=timeout, headers=headers)
+                response.raise_for_status()
+                return response.text
+            except requests.RequestException as e:
+                print(f"获取失败 (尝试 {attempt + 1}/{retry_count}): {url} - {e}")
+                if attempt < retry_count - 1:
+                    time.sleep(retry_delay)
+
+        return None
+
+    def _prefetch_sources(self, sources: List[Dict]) -> Dict[str, str]:
+        """
+        并行预取所有启用的数据源，返回 URL -> 文本 的映射。
+        网络等待从「串行求和」降为「最慢一个」。
+        """
+        enabled = [source for source in sources if source.get("enabled", True)]
+        if not enabled:
+            return {}
+
+        workers = min(16, len(enabled))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            texts = list(pool.map(lambda source: self._download_text(source["url"]), enabled))
+
+        return {source["url"]: text for source, text in zip(enabled, texts)}
+
     def fetch_domain_list(self, url: str, format_type: str = "domain", source_name: str = None, csv_config: Dict = None) -> Tuple[Set[str], Set[str], Dict]:
         """
         🔧 修复：从URL获取域名列表，正确处理特定路径规则的动作分配
@@ -1391,7 +1464,15 @@ class SearXNGHostnamesGenerator:
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 }
 
-                response = requests.get(url, timeout=timeout, headers=headers)
+                prefetched = getattr(self, "_prefetched_texts", {})
+                if url in prefetched:
+                    if prefetched[url] is None:
+                        # 预取阶段已重试失败，不再串行重试一次
+                        print(f"放弃获取 {url}")
+                        return domains, {}, stats
+                    response = _CachedResponse(prefetched[url])
+                else:
+                    response = requests.get(url, timeout=timeout, headers=headers)
                 response.raise_for_status()
 
                 # CSV 格式特殊处理
@@ -1810,7 +1891,7 @@ class SearXNGHostnamesGenerator:
                 domain = domain[4:]
 
         # 移除空格和特殊字符
-        domain = re.sub(r'[^\w.-]', '', domain)
+        domain = INVALID_CHARS_RE.sub('', domain)
 
         # 检查是否是IP地址
         if self.config["parsing"]["ignore_ip"] and self.is_ip_address(domain):
@@ -1836,8 +1917,7 @@ class SearXNGHostnamesGenerator:
         Returns:
             是否是IP地址
         """
-        ip_pattern = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
-        return bool(ip_pattern.match(domain))
+        return bool(IP_RE.fullmatch(domain))
 
     def is_valid_domain(self, domain: str) -> bool:
         """
@@ -1869,9 +1949,9 @@ class SearXNGHostnamesGenerator:
         # 检查每个部分的格式
         for part in parts:
             # 🔧 允许更宽松的字符集，包括连字符
-            if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$', part):
+            if not DOMAIN_PART_RE.fullmatch(part):
                 # 🔧 特殊情况：单个字符的部分也允许
-                if len(part) == 1 and re.match(r'^[a-zA-Z0-9]$', part):
+                if len(part) == 1 and SINGLE_CHAR_RE.fullmatch(part):
                     continue
                 return False
 
@@ -1898,7 +1978,7 @@ class SearXNGHostnamesGenerator:
         # 转义特殊字符
         escaped_domain = re.escape(domain)
         # 添加子域名匹配
-        return f'(.*\.)?{escaped_domain}$'
+        return rf'(.*\.)?{escaped_domain}$'
 
     def smart_sort_domains(self, domains: Set[str]) -> List[str]:
         """
@@ -2336,6 +2416,9 @@ class SearXNGHostnamesGenerator:
         """
         为域名列表创建分批的规则
 
+        每个批次只渲染一次；仅当整批超过 max_rule_length 时才拆分，
+        避免原实现中每加入一个域名就重建整批正则的 O(n²) 开销。
+
         Args:
             domains: 域名列表
             tld: 顶级域名（可选，用于优化）
@@ -2345,41 +2428,29 @@ class SearXNGHostnamesGenerator:
         Returns:
             分批后的规则列表
         """
+        use_tld = bool(tld) and self.config["optimization"].get("enable_advanced_tld_merge", True)
+
+        def render(batch: List[str]) -> str:
+            if use_tld:
+                return self._create_tld_optimized_rule(batch, tld)
+            return self._create_simple_rule(batch)
+
         rules = []
-        current_batch = []
-
-        for domain in domains:
-            test_batch = current_batch + [domain]
-
-            # 创建测试规则
-            if tld and self.config["optimization"].get("enable_advanced_tld_merge", True):
-                test_rule = self._create_tld_optimized_rule(test_batch, tld)
-            else:
-                test_rule = self._create_simple_rule(test_batch)
-
-            # 检查是否超过限制
-            if (len(test_batch) > max_domains_per_rule or
-                len(test_rule) > max_rule_length):
-
-                # 保存当前批次
-                if current_batch:
-                    if tld and self.config["optimization"].get("enable_advanced_tld_merge", True):
-                        rules.append(self._create_tld_optimized_rule(current_batch, tld))
-                    else:
-                        rules.append(self._create_simple_rule(current_batch))
-
-                # 开始新批次
-                current_batch = [domain]
-            else:
-                current_batch.append(domain)
-
-        # 处理最后一个批次
-        if current_batch:
-            if tld and self.config["optimization"].get("enable_advanced_tld_merge", True):
-                rules.append(self._create_tld_optimized_rule(current_batch, tld))
-            else:
-                rules.append(self._create_simple_rule(current_batch))
-
+        for start in range(0, len(domains), max_domains_per_rule):
+            batch = domains[start:start + max_domains_per_rule]
+            rule = render(batch)
+            if len(rule) <= max_rule_length:
+                rules.append(rule)
+                continue
+            # 超长批次：贪心取能放下的最长前缀，剩余部分继续分批
+            while batch:
+                fit = 1
+                for size in range(2, len(batch) + 1):
+                    if len(render(batch[:size])) > max_rule_length:
+                        break
+                    fit = size
+                rules.append(render(batch[:fit]))
+                batch = batch[fit:]
         return rules
 
     def _create_tld_optimized_rule(self, domains: List[str], tld: str) -> str:
@@ -2491,6 +2562,9 @@ class SearXNGHostnamesGenerator:
             'replace': 0
         }
 
+        # 并行预取所有启用的数据源，网络等待由串行改为并行
+        self._prefetched_texts = self._prefetch_sources(self.config["sources"])
+
         # 从在线源收集域名
         for source in self.config["sources"]:
             if not source.get("enabled", True):
@@ -2564,6 +2638,8 @@ class SearXNGHostnamesGenerator:
 
             # 清除临时变量
             delattr(self, '_current_source_action')
+
+        self._prefetched_texts = {}
 
         # 从自定义规则文件加载
         print(f"\n处理自定义规则文件...")

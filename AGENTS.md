@@ -107,7 +107,7 @@ Family-wide Markdown rules, shared verbatim across all ZJ projects:
 
 ## Project
 
-ContentFarm4SearXNG is a Python-based tool that generates hostname rules for SearXNG search engine. It fetches content farm filter lists from various sources, processes them, and generates categorized YAML rule files for SearXNG to filter out low-quality content farms while prioritizing reliable sources.
+ContentFarm4SearXNG is a Python-based tool that generates hostname rules for SearXNG. It fetches content farm filter lists from configured sources, applies the manual rules in `custom/classify.txt`, and writes categorized YAML rule files to `dist/` for SearXNG's hostnames plugin.
 
 ## Commands
 
@@ -115,10 +115,10 @@ ContentFarm4SearXNG is a Python-based tool that generates hostname rules for Sea
 
 ```bash
 # Install dependencies
-pip install requests pyyaml argparse
+pip install requests pyyaml
 
-# Run the hostname generator (main build process)
-python3 hostname_generator.py
+# Run the build (fetch, classify, generate all outputs)
+python3 build.py
 
 # Running tests
 python3 -m unittest discover -s tests -p "test_*.py"  # If test directory exists
@@ -133,6 +133,14 @@ python3 -m unittest tests/test_specific_file.py
 # Run a specific test method
 python3 -m unittest tests.test_specific_file.TestClass.test_method
 ```
+
+## Architecture
+
+1. **Fetch**: `_prefetch_sources()` downloads all enabled sources in a thread pool; per-source retries keep the 30s timeout / 3 attempts / 1s backoff policy.
+2. **Parse**: each source is parsed by format (uBlock, v2ray, plain domain, CSV); path-specific rules follow `specific_path_action` (default `smart`: remove → low_priority).
+3. **Classify**: `custom/classify.txt` rules are indexed once (exact domains in a dict, `*.` wildcards in a suffix list) and override source defaults; skip only blocks the source default.
+4. **Compress**: domains are sorted by TLD, grouped, and merged with common prefix/suffix factoring; each batch (≤256 domains) is rendered once and split only if it exceeds 65536 characters.
+5. **Output**: `dist/` receives the six YAML files; `hostnames-config.yml` references the other five.
 
 ## Conventions
 
@@ -185,15 +193,16 @@ python3 -m unittest tests.test_specific_file.TestClass.test_method
 
 ```text
 ContentFarm4SearXNG/
-├── hostname_generator.py          # Main generator script
-├── auto_classify.txt              # Manual classification rules
-├── .github/workflows/main.yml      # CI/CD workflow
-└── rules/                          # Generated rule files
-    ├── hostnames-config.yml        # Main configuration
-    ├── high-priority-hosts.yml     # High priority domains
-    ├── low-priority-hosts.yml      # Low priority domains
-    ├── remove-hosts.yml            # Domains to remove
-    └── rewrite-hosts.yml           # Domain replacement rules
+├── build.py                       # Main build script
+├── custom/classify.txt            # Manual classification rules (input)
+├── dist/                          # Generated YAML rule files (output)
+│   ├── hostnames-config.yml       # Main configuration
+│   ├── high-priority-hosts.yml    # High priority domains
+│   ├── low-priority-hosts.yml     # Low priority domains
+│   ├── low-priority-hosts-all.yml # Low priority + remove union
+│   ├── remove-hosts.yml           # Domains to remove
+│   └── rewrite-hosts.yml          # Domain replacement rules
+└── .github/workflows/main.yml     # CI/CD workflow
 ```
 
 ## Dependencies
@@ -201,7 +210,6 @@ ContentFarm4SearXNG/
 - Python 3.8+ (Python 3 is used in the GitHub workflow)
 - requests: For HTTP requests to fetch rule sources
 - pyyaml: For YAML configuration file processing
-- argparse: For command line argument parsing
 
 ## Testing
 
@@ -210,7 +218,7 @@ The project does not currently have a dedicated test suite. When adding tests:
 1. Create a `tests/` directory
 2. Use the unittest module
 3. Name test files with `test_` prefix
-4. Test each major function in the hostname generator
+4. Test each major stage (fetch, parse, classify, regex generation, output)
 
 ## Release Process
 
@@ -223,6 +231,6 @@ The project uses GitHub Actions for automated releases:
 ## Key Implementation Details
 
 1. **Domain Processing**: The generator supports multiple rule formats (uBlock, v2ray, CSV)
-2. **Auto-classification**: Uses rules from `auto_classify.txt` to override source classifications
-3. **Optimization**: Implements domain merging and regex optimization for performance
+2. **Auto-classification**: Uses the indexed rules from `custom/classify.txt` to override source classifications (exact domains via dict, `*.` wildcards via suffix list)
+3. **Optimization**: Sources are prefetched in parallel; domains are grouped by TLD and merged with common prefix/suffix factoring; batches are rendered once and only split when a rule exceeds the length limit
 4. **Error Handling**: Continues processing even if some sources fail, with detailed error reporting

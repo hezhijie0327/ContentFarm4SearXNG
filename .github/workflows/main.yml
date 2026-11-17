@@ -21,7 +21,7 @@ jobs:
                   sudo pip install requests pyyaml argparse
             - name: Step 4 - Build ContentFarm4SearXNG
               run: |
-                  sudo python "./hostname_generator.py"
+                  sudo python "./build.py"
             - name: Step 5 - Release ContentFarm4SearXNG
               run: |
                   curl -s "https://raw.githubusercontent.com/hezhijie0327/Toolkit/main/Git.sh" > "/tmp/Git.sh"
